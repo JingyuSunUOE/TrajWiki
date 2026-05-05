@@ -1,0 +1,77 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "trajpatch"
+version = "0.1.0"
+description = "Long-memory benchmark framework with episodic trajectories, wiki routing, OpenAI-compatible providers, and evidence-grounded evaluation."
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "OpenAI Codex" }]
+dependencies = [
+  "typer>=0.12",
+  "pydantic>=2.8",
+  "pydantic-settings>=2.4",
+  "sqlalchemy>=2.0",
+  "orjson>=3.10",
+  "numpy>=1.26",
+  "matplotlib>=3.8",
+  "rich>=13.7",
+  "python-dotenv>=1.0",
+  "litellm>=1.44",
+  "openai>=1.43",
+  "anthropic>=0.34",
+  "google-genai>=1.11",
+  "torch>=2.3",
+  # Keep Transformers aligned with vLLM 0.10.2; older releases can miss
+  # tokenizer attributes required by vLLM's tokenizer cache for Qwen models.
+  "transformers==4.56.1",
+  "accelerate>=0.33",
+  "sentence-transformers>=3.0",
+  "safetensors>=0.4",
+  # Keep vLLM on a CUDA 12-compatible release for the CUDA 12.6 runtime image.
+  # Newer unconstrained wheels may require libcudart.so.13 and fail at import time.
+  "vllm==0.10.2",
+]
+
+[project.optional-dependencies]
+quant = [
+  "bitsandbytes>=0.43",
+]
+dev = [
+  "pytest>=8.3",
+  "pytest-cov>=5.0",
+  "ruff>=0.6",
+  "mypy>=1.11",
+]
+
+[project.scripts]
+trajpatch = "trajpatch.cli:app"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "N", "RUF"]
+
+[tool.mypy]
+python_version = "3.11"
+warn_unused_configs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+strict_optional = true
+ignore_missing_imports = true
+packages = ["trajpatch"]

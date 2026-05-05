@@ -1,0 +1,32 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+
+# Local environments and secrets
+.env
+.venv/
+venv/
+
+# IDE / OS metadata
+.idea/
+.DS_Store
+
+# Benchmark outputs and runtime caches
+output/
+.trajpatch_cache/
+.trajpatch_cache*/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+
+# Local benchmark datasets
+locomo/
+medmt/
+
+# Generated analysis plots and tables; keep plot/*.py scripts trackable.
+plot/*.csv
+plot/*.json
+plot/*.png
+plot/*.pdf
