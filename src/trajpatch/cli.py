@@ -31,11 +31,18 @@ except Exception:  # noqa: BLE001
         def Option(default=..., *args, **kwargs):
             return default
 
+        @staticmethod
+        def Argument(default=..., *args, **kwargs):
+            return default
+
     typer = _FallbackModule()
 
 from rich.console import Console
 
 from trajpatch.analysis import (
+    analyze_auditability,
+    analyze_cost_benefit,
+    analyze_offline_ablation,
     analyze_locomo_run_failures,
     diff_locomo_failure_reports,
     load_incomplete_run_diagnostics,
@@ -104,6 +111,17 @@ def _run_benchmark(
     cuda_preflight_mode: str,
     cuda_preflight_reserve_gb: float,
     cuda_preflight_report: bool,
+    ablation_diagnostics: bool,
+    retrieval_rank_save_mode: str,
+    retrieval_rank_save_limit: int,
+    offline_context_budgets: str,
+    offline_rank_cutoffs: str,
+    cost_diagnostics: bool,
+    cost_call_save_mode: str,
+    cost_price_config: Path | None,
+    future_query_counts: str,
+    auditability_diagnostics: bool,
+    audit_packet_save_mode: str,
     verbose: bool,
 ) -> None:
     chosen_backbone_provider = provider_kind or backbone_provider_kind
@@ -154,6 +172,17 @@ def _run_benchmark(
         cuda_preflight_mode=cuda_preflight_mode,
         cuda_preflight_reserve_gb=cuda_preflight_reserve_gb,
         cuda_preflight_report=cuda_preflight_report,
+        ablation_diagnostics=ablation_diagnostics,
+        retrieval_rank_save_mode=retrieval_rank_save_mode,
+        retrieval_rank_save_limit=retrieval_rank_save_limit,
+        offline_context_budgets=offline_context_budgets,
+        offline_rank_cutoffs=offline_rank_cutoffs,
+        cost_diagnostics=cost_diagnostics,
+        cost_call_save_mode=cost_call_save_mode,
+        cost_price_config=cost_price_config,
+        future_query_counts=future_query_counts,
+        auditability_diagnostics=auditability_diagnostics,
+        audit_packet_save_mode=audit_packet_save_mode,
         verbose=verbose,
     )
     report = PipelineRunner(config, console=console).run()
@@ -309,6 +338,61 @@ def run(
         "--cuda-preflight-report/--no-cuda-preflight-report",
         help="Write status/cuda_preflight.json.",
     ),
+    ablation_diagnostics: bool = typer.Option(
+        False,
+        "--ablation-diagnostics/--no-ablation-diagnostics",
+        help="Write extra retrieval/gold-label diagnostics for offline ablation analysis.",
+    ),
+    retrieval_rank_save_mode: str = typer.Option(
+        "top-n",
+        "--retrieval-rank-save-mode",
+        help="Retrieval diagnostic row saving: top-n or full.",
+    ),
+    retrieval_rank_save_limit: int = typer.Option(
+        100,
+        "--retrieval-rank-save-limit",
+        help="Top-N page/trajectory ranked rows to save when retrieval rank save mode is top-n.",
+    ),
+    offline_context_budgets: str = typer.Option(
+        "4000,8000,16000,32000",
+        "--offline-context-budgets",
+        help="Comma-separated context budgets recorded in run metadata for offline ablations.",
+    ),
+    offline_rank_cutoffs: str = typer.Option(
+        "5,10,15,20,30,50",
+        "--offline-rank-cutoffs",
+        help="Comma-separated rank cutoffs recorded in run metadata for offline ablations.",
+    ),
+    cost_diagnostics: bool = typer.Option(
+        False,
+        "--cost-diagnostics/--no-cost-diagnostics",
+        help="Write extra cost-benefit diagnostics for offline analysis.",
+    ),
+    cost_call_save_mode: str = typer.Option(
+        "summary",
+        "--cost-call-save-mode",
+        help="Cost call row saving: summary or compact.",
+    ),
+    cost_price_config: Path | None = typer.Option(
+        None,
+        "--cost-price-config",
+        help="Optional LLM pricing JSON used by offline cost-benefit analysis.",
+    ),
+    future_query_counts: str = typer.Option(
+        "1,2,5,10,20,50,100",
+        "--future-query-counts",
+        help="Comma-separated future query counts recorded in run metadata.",
+    ),
+    auditability_diagnostics: bool = typer.Option(
+        False,
+        "--auditability-diagnostics/--no-auditability-diagnostics",
+        help="Write extra provenance/auditability diagnostics for offline analysis.",
+    ),
+    audit_packet_save_mode: str = typer.Option(
+        "summary",
+        "--audit-packet-save-mode",
+        help="Audit packet row saving: summary or compact.",
+    ),
     verbose: bool = typer.Option(False, "--verbose/--no-verbose", help="Print step-level timing logs."),
 ) -> None:
     _run_benchmark(
@@ -357,6 +441,17 @@ def run(
         cuda_preflight_mode=cuda_preflight_mode,
         cuda_preflight_reserve_gb=cuda_preflight_reserve_gb,
         cuda_preflight_report=cuda_preflight_report,
+        ablation_diagnostics=ablation_diagnostics,
+        retrieval_rank_save_mode=retrieval_rank_save_mode,
+        retrieval_rank_save_limit=retrieval_rank_save_limit,
+        offline_context_budgets=offline_context_budgets,
+        offline_rank_cutoffs=offline_rank_cutoffs,
+        cost_diagnostics=cost_diagnostics,
+        cost_call_save_mode=cost_call_save_mode,
+        cost_price_config=cost_price_config,
+        future_query_counts=future_query_counts,
+        auditability_diagnostics=auditability_diagnostics,
+        audit_packet_save_mode=audit_packet_save_mode,
         verbose=verbose,
     )
 
@@ -431,6 +526,17 @@ def benchmark_locomo(
     cuda_preflight_report: bool = typer.Option(
         True, "--cuda-preflight-report/--no-cuda-preflight-report"
     ),
+    ablation_diagnostics: bool = typer.Option(False, "--ablation-diagnostics/--no-ablation-diagnostics"),
+    retrieval_rank_save_mode: str = typer.Option("top-n", "--retrieval-rank-save-mode"),
+    retrieval_rank_save_limit: int = typer.Option(100, "--retrieval-rank-save-limit"),
+    offline_context_budgets: str = typer.Option("4000,8000,16000,32000", "--offline-context-budgets"),
+    offline_rank_cutoffs: str = typer.Option("5,10,15,20,30,50", "--offline-rank-cutoffs"),
+    cost_diagnostics: bool = typer.Option(False, "--cost-diagnostics/--no-cost-diagnostics"),
+    cost_call_save_mode: str = typer.Option("summary", "--cost-call-save-mode"),
+    cost_price_config: Path | None = typer.Option(None, "--cost-price-config"),
+    future_query_counts: str = typer.Option("1,2,5,10,20,50,100", "--future-query-counts"),
+    auditability_diagnostics: bool = typer.Option(False, "--auditability-diagnostics/--no-auditability-diagnostics"),
+    audit_packet_save_mode: str = typer.Option("summary", "--audit-packet-save-mode"),
     verbose: bool = typer.Option(False, "--verbose/--no-verbose"),
 ) -> None:
     _run_benchmark(
@@ -479,6 +585,17 @@ def benchmark_locomo(
         cuda_preflight_mode=cuda_preflight_mode,
         cuda_preflight_reserve_gb=cuda_preflight_reserve_gb,
         cuda_preflight_report=cuda_preflight_report,
+        ablation_diagnostics=ablation_diagnostics,
+        retrieval_rank_save_mode=retrieval_rank_save_mode,
+        retrieval_rank_save_limit=retrieval_rank_save_limit,
+        offline_context_budgets=offline_context_budgets,
+        offline_rank_cutoffs=offline_rank_cutoffs,
+        cost_diagnostics=cost_diagnostics,
+        cost_call_save_mode=cost_call_save_mode,
+        cost_price_config=cost_price_config,
+        future_query_counts=future_query_counts,
+        auditability_diagnostics=auditability_diagnostics,
+        audit_packet_save_mode=audit_packet_save_mode,
         verbose=verbose,
     )
 
@@ -556,6 +673,17 @@ def benchmark_medmt(
     cuda_preflight_report: bool = typer.Option(
         True, "--cuda-preflight-report/--no-cuda-preflight-report"
     ),
+    ablation_diagnostics: bool = typer.Option(False, "--ablation-diagnostics/--no-ablation-diagnostics"),
+    retrieval_rank_save_mode: str = typer.Option("top-n", "--retrieval-rank-save-mode"),
+    retrieval_rank_save_limit: int = typer.Option(100, "--retrieval-rank-save-limit"),
+    offline_context_budgets: str = typer.Option("4000,8000,16000,32000", "--offline-context-budgets"),
+    offline_rank_cutoffs: str = typer.Option("5,10,15,20,30,50", "--offline-rank-cutoffs"),
+    cost_diagnostics: bool = typer.Option(False, "--cost-diagnostics/--no-cost-diagnostics"),
+    cost_call_save_mode: str = typer.Option("summary", "--cost-call-save-mode"),
+    cost_price_config: Path | None = typer.Option(None, "--cost-price-config"),
+    future_query_counts: str = typer.Option("1,2,5,10,20,50,100", "--future-query-counts"),
+    auditability_diagnostics: bool = typer.Option(False, "--auditability-diagnostics/--no-auditability-diagnostics"),
+    audit_packet_save_mode: str = typer.Option("summary", "--audit-packet-save-mode"),
     verbose: bool = typer.Option(False, "--verbose/--no-verbose"),
 ) -> None:
     _run_benchmark(
@@ -604,6 +732,17 @@ def benchmark_medmt(
         cuda_preflight_mode=cuda_preflight_mode,
         cuda_preflight_reserve_gb=cuda_preflight_reserve_gb,
         cuda_preflight_report=cuda_preflight_report,
+        ablation_diagnostics=ablation_diagnostics,
+        retrieval_rank_save_mode=retrieval_rank_save_mode,
+        retrieval_rank_save_limit=retrieval_rank_save_limit,
+        offline_context_budgets=offline_context_budgets,
+        offline_rank_cutoffs=offline_rank_cutoffs,
+        cost_diagnostics=cost_diagnostics,
+        cost_call_save_mode=cost_call_save_mode,
+        cost_price_config=cost_price_config,
+        future_query_counts=future_query_counts,
+        auditability_diagnostics=auditability_diagnostics,
+        audit_packet_save_mode=audit_packet_save_mode,
         verbose=verbose,
     )
 
@@ -817,6 +956,135 @@ def analyze_failures(
         show_ranks=show_ranks,
         show_facets=show_facets,
     )
+
+
+@app.command(name="analyze-offline-ablation")
+def analyze_offline_ablation_command(
+    run_path: Path = typer.Argument(
+        ...,
+        exists=True,
+        help="Path to a completed LOCOMO run directory.",
+    ),
+    variants: str = typer.Option(
+        "full,no_wiki_direct,wiki_only,flat_raw,snapshot_m1,snapshot_m2,source_supported_only",
+        help="Comma-separated offline ablation variants.",
+    ),
+    budgets: str = typer.Option(
+        "4000,8000,16000,32000",
+        help="Comma-separated context token budgets.",
+    ),
+    rank_cutoffs: str = typer.Option(
+        "5,10,15,20,30,50",
+        help="Comma-separated retrieval rank cutoffs.",
+    ),
+    json_output: bool = typer.Option(
+        False,
+        "--json",
+        help="Print generated artifact paths and summary metadata as JSON.",
+    ),
+) -> None:
+    try:
+        report = analyze_offline_ablation(
+            run_path,
+            variants=variants,
+            budgets=budgets,
+            rank_cutoffs=rank_cutoffs,
+        )
+    except (FileNotFoundError, ValueError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+    if json_output:
+        console.print_json(data=report)
+        return
+    console.print(f"Offline ablation artifacts written to {report['analysis_dir']}")
+    console.print(f"Summary: {report['summary_path']}")
+    console.print(f"Table: {report['table_path']}")
+
+
+@app.command(name="analyze-cost-benefit")
+def analyze_cost_benefit_command(
+    run_path: Path = typer.Argument(
+        ...,
+        exists=True,
+        help="Path to a completed LOCOMO run directory.",
+    ),
+    baselines: str = typer.Option(
+        "trajwiki_observed,full_context_proxy,no_wiki_direct,flat_raw,wiki_only",
+        help="Comma-separated observed/proxy methods to include.",
+    ),
+    price_config: Path | None = typer.Option(
+        None,
+        "--price-config",
+        help="Optional LLM pricing JSON used to estimate dollar cost.",
+    ),
+    future_query_counts: str = typer.Option(
+        "1,2,5,10,20,50,100",
+        "--future-query-counts",
+        help="Comma-separated future query counts for amortization curves.",
+    ),
+    json_output: bool = typer.Option(
+        False,
+        "--json",
+        help="Print generated artifact paths and summary metadata as JSON.",
+    ),
+) -> None:
+    try:
+        report = analyze_cost_benefit(
+            run_path,
+            baselines=baselines,
+            price_config_path=price_config,
+            future_query_counts=future_query_counts,
+        )
+    except (FileNotFoundError, ValueError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+    if json_output:
+        console.print_json(data=report)
+        return
+    console.print(f"Cost-benefit artifacts written to {report['analysis_dir']}")
+    console.print(f"Summary: {report['summary_path']}")
+    console.print(f"Quality table: {report['quality_table_path']}")
+    console.print(f"Break-even table: {report['break_even_path']}")
+
+
+@app.command(name="analyze-auditability")
+def analyze_auditability_command(
+    run_path: Path = typer.Argument(
+        ...,
+        exists=True,
+        help="Path to a completed LOCOMO run directory.",
+    ),
+    baselines: str = typer.Option(
+        "trajwiki_observed,full_context_proxy,no_wiki_direct,flat_raw,wiki_only",
+        help="Comma-separated observed/proxy methods to include.",
+    ),
+    audit_labels: Path | None = typer.Option(
+        None,
+        "--audit-labels",
+        help="Optional CSV/JSONL human audit labels.",
+    ),
+    json_output: bool = typer.Option(
+        False,
+        "--json",
+        help="Print generated artifact paths and summary metadata as JSON.",
+    ),
+) -> None:
+    try:
+        report = analyze_auditability(
+            run_path,
+            baselines=baselines,
+            audit_labels_path=audit_labels,
+        )
+    except (FileNotFoundError, ValueError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+    if json_output:
+        console.print_json(data=report)
+        return
+    console.print(f"Auditability artifacts written to {report['analysis_dir']}")
+    console.print(f"Summary: {report['summary_path']}")
+    console.print(f"Source support table: {report['source_support_table_path']}")
+    console.print(f"Failure localization table: {report['failure_localization_table_path']}")
 
 
 @app.command()

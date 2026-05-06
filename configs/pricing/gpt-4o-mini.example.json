@@ -1,0 +1,11 @@
+{
+  "schema_version": "llm_pricing_v1",
+  "price_config_date": "USER_SUPPLIED",
+  "currency": "USD",
+  "models": {
+    "gpt-4o-mini": {
+      "input_per_1m_tokens": null,
+      "output_per_1m_tokens": null
+    }
+  }
+}

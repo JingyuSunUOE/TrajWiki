@@ -40,6 +40,9 @@ from trajpatch.analysis.text_only_filter import (
     manifest_entry_for_row,
     summarize_text_only_filter,
 )
+from trajpatch.analysis.auditability import write_auditability_artifacts
+from trajpatch.analysis.cost_benefit import write_cost_diagnostic_artifacts
+from trajpatch.analysis.gold_labels import write_gold_labels_artifact
 from trajpatch.exceptions import ParserValidationError, ProviderConfigurationError
 from trajpatch.memory import MemoryOrchestrator, RetrievalEngine
 from trajpatch.memory.wiki import WikiCompiler
@@ -1003,6 +1006,9 @@ class PipelineRunner:
             self._emit_event("artifact_write_start", stage="artifact_write")
             self._write_fallback_repair_events()
             self._write_text_only_filter_artifacts(summary)
+            self._write_gold_label_artifacts(evaluated_rows)
+            self._write_cost_diagnostic_artifacts(evaluated_rows)
+            self._write_auditability_artifacts(evaluated_rows)
             self._persist_run_reporting(summary)
             self._persist_run_index(summary)
             self.exporter.export_benchmark_details(details)
@@ -1086,6 +1092,9 @@ class PipelineRunner:
             retrieval_expansion_mode=self.config.retrieval_expansion_mode,
             trace=self._trace if self.config.verbose else None,
             llm_provider=self.llm_provider,
+            ablation_diagnostics_enabled=self.config.ablation_diagnostics,
+            retrieval_rank_save_mode=self.config.retrieval_rank_save_mode,
+            retrieval_rank_save_limit=self.config.retrieval_rank_save_limit,
         )
         self.exporter = ArtifactExporter(self.config.output_dir, self.store, run_dir=self.run_dir)
         self.cache_stats = self._empty_cache_stats()
@@ -1184,6 +1193,9 @@ class PipelineRunner:
             retrieval_expansion_mode=self.config.retrieval_expansion_mode,
             trace=self._trace if self.config.verbose else None,
             llm_provider=self.llm_provider,
+            ablation_diagnostics_enabled=self.config.ablation_diagnostics,
+            retrieval_rank_save_mode=self.config.retrieval_rank_save_mode,
+            retrieval_rank_save_limit=self.config.retrieval_rank_save_limit,
         )
         self.exporter = ArtifactExporter(self.config.output_dir, self.store, run_dir=run_dir)
         self.cache_stats = self._empty_cache_stats()
@@ -4254,6 +4266,38 @@ class PipelineRunner:
                 "details": str(self.run_dir / "details.json"),
                 "summary": str(self.run_dir / "summary.json"),
                 "fallback_repair_events": str(self.run_dir / "fallback_repair_events.jsonl"),
+                "gold_labels": str(self.run_dir / "analysis" / "gold_labels.jsonl"),
+                "offline_ablation_rows": str(self.run_dir / "analysis" / "offline_ablation_rows.jsonl"),
+                "offline_ablation_summary": str(self.run_dir / "analysis" / "offline_ablation_summary.json"),
+                "offline_ablation_table": str(self.run_dir / "analysis" / "offline_ablation_table.csv"),
+                "evidence_funnel": str(self.run_dir / "analysis" / "evidence_funnel.csv"),
+                "cost_recall_curve": str(self.run_dir / "analysis" / "cost_recall_curve.csv"),
+                "variant_examples": str(self.run_dir / "analysis" / "variant_examples.jsonl"),
+                "cost_call_rows": str(self.run_dir / "analysis" / "cost_call_rows.jsonl"),
+                "cost_query_rows": str(self.run_dir / "analysis" / "cost_query_rows.jsonl"),
+                "cost_phase_summary": str(self.run_dir / "analysis" / "cost_phase_summary.csv"),
+                "cost_quality_table": str(self.run_dir / "analysis" / "cost_quality_table.csv"),
+                "amortization_break_even": str(self.run_dir / "analysis" / "amortization_break_even.csv"),
+                "amortized_cost_curve": str(self.run_dir / "analysis" / "amortized_cost_curve.csv"),
+                "memory_scaling": str(self.run_dir / "analysis" / "memory_scaling.csv"),
+                "candidate_scaling": str(self.run_dir / "analysis" / "candidate_scaling.csv"),
+                "cost_benefit_summary": str(self.run_dir / "analysis" / "cost_benefit_summary.json"),
+                "answer_support_rows": str(self.run_dir / "analysis" / "answer_support_rows.jsonl"),
+                "answer_context_claim_rows": str(
+                    self.run_dir / "analysis" / "answer_context_claim_rows.jsonl"
+                ),
+                "claim_lifecycle_rows": str(self.run_dir / "analysis" / "claim_lifecycle_rows.jsonl"),
+                "audit_packet_rows": str(self.run_dir / "analysis" / "audit_packet_rows.jsonl"),
+                "auditability_rows": str(self.run_dir / "analysis" / "auditability_rows.jsonl"),
+                "auditability_summary": str(self.run_dir / "analysis" / "auditability_summary.json"),
+                "source_support_table": str(self.run_dir / "analysis" / "source_support_table.csv"),
+                "unsupported_answer_table": str(self.run_dir / "analysis" / "unsupported_answer_table.csv"),
+                "failure_localization_table": str(
+                    self.run_dir / "analysis" / "failure_localization_table.csv"
+                ),
+                "conflict_obsolete_table": str(self.run_dir / "analysis" / "conflict_obsolete_table.csv"),
+                "audit_packet_cost": str(self.run_dir / "analysis" / "audit_packet_cost.csv"),
+                "audit_examples": str(self.run_dir / "analysis" / "audit_examples.jsonl"),
                 "text_only_filter_manifest": str(self.run_dir / "analysis" / "text_only_filter_manifest.json"),
                 "text_only_filtered_summary": str(self.run_dir / "analysis" / "text_only_filtered_summary.json"),
             },
@@ -4330,6 +4374,127 @@ class PipelineRunner:
                 error_message=self._compact_error_text(exc, limit=300),
             )
 
+    def _write_gold_label_artifacts(self, evaluated_rows: list[dict[str, Any]]) -> None:
+        if self.run_dir is None or self.config.dataset != "locomo" or not self.config.ablation_diagnostics:
+            return
+        try:
+            path = write_gold_labels_artifact(
+                self.run_dir,
+                evaluated_rows,
+                database_path=self.config.database_path,
+            )
+            self._emit_event(
+                "gold_labels_artifact_written",
+                stage="artifact_write",
+                path=str(path),
+                row_count=len(evaluated_rows),
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._emit_event(
+                "gold_labels_artifact_write_failed",
+                stage="artifact_write",
+                error_type=exc.__class__.__name__,
+                error_message=self._compact_error_text(exc, limit=300),
+            )
+
+    def _cost_call_records(self) -> list[dict[str, Any]]:
+        records: list[dict[str, Any]] = []
+        seen_keys: set[tuple[str, str]] = set()
+        for provider in (self.llm_provider, self.judge_provider):
+            if isinstance(provider, SemaphoreLimitedLLMProvider):
+                provider = provider.provider
+            if not isinstance(provider, MeteredLLMProvider):
+                continue
+            for row in provider.calls:
+                metadata = dict(row.metadata or {})
+                key = (
+                    str(metadata.get("provider_call_id") or row.provider_call_id),
+                    str(metadata.get("batch_index") if metadata.get("batch_index") is not None else ""),
+                )
+                seen_keys.add(key)
+                records.append(
+                    {
+                        "role": row.role,
+                        "task": row.task,
+                        "prompt_tokens": row.prompt_tokens,
+                        "completion_tokens": row.completion_tokens,
+                        "latency_ms": row.latency_ms,
+                        "provider_call_id": row.provider_call_id,
+                        "provider_call_kind": row.provider_call_kind,
+                        "logical_item_count": row.logical_item_count,
+                        "metadata": metadata,
+                    }
+                )
+        for metadata in self.worker_structured_call_metadata:
+            metadata = dict(metadata or {})
+            key = (
+                str(metadata.get("provider_call_id") or ""),
+                str(metadata.get("batch_index") if metadata.get("batch_index") is not None else ""),
+            )
+            if key in seen_keys:
+                continue
+            records.append(
+                {
+                    "role": metadata.get("role", "backbone"),
+                    "task": metadata.get("task") or metadata.get("structured_task") or "unknown",
+                    "prompt_tokens": int(metadata.get("prompt_tokens") or 0),
+                    "completion_tokens": int(metadata.get("completion_tokens") or 0),
+                    "latency_ms": float(metadata.get("latency_ms") or 0.0),
+                    "provider_call_id": metadata.get("provider_call_id"),
+                    "provider_call_kind": metadata.get("provider_call_kind"),
+                    "logical_item_count": int(metadata.get("logical_item_count") or 1),
+                    "metadata": metadata,
+                }
+            )
+        return records
+
+    def _write_cost_diagnostic_artifacts(self, evaluated_rows: list[dict[str, Any]]) -> None:
+        if self.run_dir is None or self.config.dataset != "locomo" or not self.config.cost_diagnostics:
+            return
+        try:
+            paths = write_cost_diagnostic_artifacts(
+                run_dir=self.run_dir,
+                sample_rows=evaluated_rows,
+                database_path=self.config.database_path,
+                call_records=self._cost_call_records(),
+                save_compact_calls=self.config.cost_call_save_mode == "compact",
+            )
+            self._emit_event(
+                "cost_diagnostic_artifacts_written",
+                stage="artifact_write",
+                **paths,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._emit_event(
+                "cost_diagnostic_artifacts_write_failed",
+                stage="artifact_write",
+                error_type=exc.__class__.__name__,
+                error_message=self._compact_error_text(exc, limit=300),
+            )
+
+    def _write_auditability_artifacts(self, evaluated_rows: list[dict[str, Any]]) -> None:
+        if self.run_dir is None or self.config.dataset != "locomo" or not self.config.auditability_diagnostics:
+            return
+        try:
+            paths = write_auditability_artifacts(
+                run_dir=self.run_dir,
+                sample_rows=evaluated_rows,
+                database_path=self.config.database_path,
+                packet_save_mode=self.config.audit_packet_save_mode,
+            )
+            self._emit_event(
+                "auditability_artifacts_written",
+                stage="artifact_write",
+                **paths,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._emit_event(
+                "auditability_artifacts_write_failed",
+                stage="artifact_write",
+                error_type=exc.__class__.__name__,
+                error_message=self._compact_error_text(exc, limit=300),
+            )
+
     def _build_summary_payload(
         self,
         *,
@@ -4384,6 +4549,38 @@ class PipelineRunner:
                 "details": str(self.run_dir / "details.json"),
                 "summary": str(self.run_dir / "summary.json"),
                 "fallback_repair_events": str(self.run_dir / "fallback_repair_events.jsonl"),
+                "gold_labels": str(self.run_dir / "analysis" / "gold_labels.jsonl"),
+                "offline_ablation_rows": str(self.run_dir / "analysis" / "offline_ablation_rows.jsonl"),
+                "offline_ablation_summary": str(self.run_dir / "analysis" / "offline_ablation_summary.json"),
+                "offline_ablation_table": str(self.run_dir / "analysis" / "offline_ablation_table.csv"),
+                "evidence_funnel": str(self.run_dir / "analysis" / "evidence_funnel.csv"),
+                "cost_recall_curve": str(self.run_dir / "analysis" / "cost_recall_curve.csv"),
+                "variant_examples": str(self.run_dir / "analysis" / "variant_examples.jsonl"),
+                "cost_call_rows": str(self.run_dir / "analysis" / "cost_call_rows.jsonl"),
+                "cost_query_rows": str(self.run_dir / "analysis" / "cost_query_rows.jsonl"),
+                "cost_phase_summary": str(self.run_dir / "analysis" / "cost_phase_summary.csv"),
+                "cost_quality_table": str(self.run_dir / "analysis" / "cost_quality_table.csv"),
+                "amortization_break_even": str(self.run_dir / "analysis" / "amortization_break_even.csv"),
+                "amortized_cost_curve": str(self.run_dir / "analysis" / "amortized_cost_curve.csv"),
+                "memory_scaling": str(self.run_dir / "analysis" / "memory_scaling.csv"),
+                "candidate_scaling": str(self.run_dir / "analysis" / "candidate_scaling.csv"),
+                "cost_benefit_summary": str(self.run_dir / "analysis" / "cost_benefit_summary.json"),
+                "answer_support_rows": str(self.run_dir / "analysis" / "answer_support_rows.jsonl"),
+                "answer_context_claim_rows": str(
+                    self.run_dir / "analysis" / "answer_context_claim_rows.jsonl"
+                ),
+                "claim_lifecycle_rows": str(self.run_dir / "analysis" / "claim_lifecycle_rows.jsonl"),
+                "audit_packet_rows": str(self.run_dir / "analysis" / "audit_packet_rows.jsonl"),
+                "auditability_rows": str(self.run_dir / "analysis" / "auditability_rows.jsonl"),
+                "auditability_summary": str(self.run_dir / "analysis" / "auditability_summary.json"),
+                "source_support_table": str(self.run_dir / "analysis" / "source_support_table.csv"),
+                "unsupported_answer_table": str(self.run_dir / "analysis" / "unsupported_answer_table.csv"),
+                "failure_localization_table": str(
+                    self.run_dir / "analysis" / "failure_localization_table.csv"
+                ),
+                "conflict_obsolete_table": str(self.run_dir / "analysis" / "conflict_obsolete_table.csv"),
+                "audit_packet_cost": str(self.run_dir / "analysis" / "audit_packet_cost.csv"),
+                "audit_examples": str(self.run_dir / "analysis" / "audit_examples.jsonl"),
                 "text_only_filter_manifest": str(self.run_dir / "analysis" / "text_only_filter_manifest.json"),
                 "text_only_filtered_summary": str(self.run_dir / "analysis" / "text_only_filtered_summary.json"),
             },
@@ -4410,11 +4607,14 @@ class PipelineRunner:
     @staticmethod
     def _retrieval_compact_diagnostics_for_details(metadata: dict[str, Any]) -> dict[str, Any]:
         keys = [
+            "retrieval_rank_save_mode",
+            "retrieval_rank_save_limit",
             "diagnostic_top_n_pages",
             "diagnostic_top_n_trajectories",
             "page_ranked_total_count",
             "page_ranked_rows_truncated",
             "page_ranked_rows_compact_top_n",
+            "ablation_page_ranked_rows_v1",
             "page_cutoff_universe_diagnostics",
             "page_granularity_diagnostic_mode",
             "selected_page_rows_compact",
@@ -4426,10 +4626,14 @@ class PipelineRunner:
             "trajectory_ranked_total_count",
             "trajectory_ranked_rows_truncated",
             "trajectory_ranked_rows_compact_top_n",
+            "ablation_trajectory_ranked_rows_v1",
             "trajectory_selection_pool_rows_compact",
             "trajectory_selection_pool_rows_total_count",
             "trajectory_selection_pool_rows_truncated",
             "trajectory_cutoff_prefix_diagnostics",
+            "ablation_snapshot_candidate_rows_v1",
+            "ablation_source_candidate_rows_v1",
+            "answer_context_token_breakdown_v1",
         ]
         return {key: metadata.get(key) for key in keys if key in metadata}
 
@@ -4541,6 +4745,17 @@ class PipelineRunner:
             "k": self.config.k,
             "neighbor_radius": self.config.neighbor_radius,
             "retrieval_expansion_mode": self.config.retrieval_expansion_mode,
+            "ablation_diagnostics": bool(self.config.ablation_diagnostics),
+            "retrieval_rank_save_mode": self.config.retrieval_rank_save_mode,
+            "retrieval_rank_save_limit": self.config.retrieval_rank_save_limit,
+            "offline_context_budgets": self.config.offline_context_budgets,
+            "offline_rank_cutoffs": self.config.offline_rank_cutoffs,
+            "cost_diagnostics": bool(self.config.cost_diagnostics),
+            "cost_call_save_mode": self.config.cost_call_save_mode,
+            "cost_price_config": str(self.config.cost_price_config) if self.config.cost_price_config else None,
+            "future_query_counts": self.config.future_query_counts,
+            "auditability_diagnostics": bool(self.config.auditability_diagnostics),
+            "audit_packet_save_mode": self.config.audit_packet_save_mode,
             "max_samples": self.config.max_samples,
             "conv_workers": self.config.conv_workers,
             "worker_mode": "sharded" if self.config.conv_workers > 1 else "serial",

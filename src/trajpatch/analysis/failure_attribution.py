@@ -20,6 +20,13 @@ from trajpatch.diagnostics.fallback_repair import (
     legacy_fallback_repair_diagnostics,
     summarize_fallback_repair_events,
 )
+from trajpatch.analysis.direct_retrieval import rank_direct_trajectories as _shared_rank_direct_trajectories
+from trajpatch.analysis.trajectory_drift import (
+    build_trajectory_drift_diagnostics,
+    build_trajectory_drift_rows,
+    compact_query_drift_row,
+    trajectory_drift_fields_for_gold_trajectories,
+)
 from trajpatch.memory.facets import (
     build_sample_entity_lexicon,
     classify_query_shape_v1,
@@ -30,12 +37,6 @@ from trajpatch.memory.historical import sanitize_historical_item_terms
 from trajpatch.memory.readability import count_fragment_lines
 from trajpatch.memory.trajectory_summaries import is_internal_summary_keyword, sanitize_summary_keyword_values
 from trajpatch.providers.metering import phase_for_task
-from trajpatch.analysis.trajectory_drift import (
-    build_trajectory_drift_diagnostics,
-    build_trajectory_drift_rows,
-    compact_query_drift_row,
-    trajectory_drift_fields_for_gold_trajectories,
-)
 from trajpatch.utils.text import collapse_whitespace, extract_keywords
 
 
@@ -2689,43 +2690,19 @@ def _rank_direct_trajectories(
     trajectory_refs: dict[str, set[str]] | None = None,
     trajectory_lengths: dict[str, int] | None = None,
 ) -> tuple[list[str], str, list[dict[str, Any]]]:
-    candidates = sorted(str(trajectory_id) for trajectory_id in sample_to_trajectories.get(sample_id, set()))
-    query_terms = _direct_query_terms(
+    return _shared_rank_direct_trajectories(
+        sample_id=sample_id,
         question=question,
         query_entities=query_entities,
         query_facets=query_facets,
         query_shape=query_shape,
+        sample_to_trajectories=sample_to_trajectories,
+        trajectory_metadata=trajectory_metadata,
+        claims_by_trajectory=claims_by_trajectory,
+        trajectory_refs=trajectory_refs,
+        trajectory_lengths=trajectory_lengths,
+        diagnostic_top_n=DIRECT_TRAJECTORY_DIAGNOSTIC_TOP_N,
     )
-    scored: list[tuple[float, str, dict[str, Any]]] = []
-    metadata_signal_count = 0
-    for trajectory_id in candidates:
-        profile = _score_direct_trajectory_profile(
-            trajectory_id=trajectory_id,
-            query_terms=query_terms,
-            query_entities=query_entities,
-            query_facets=query_facets,
-            query_shape=query_shape,
-            trajectory_metadata=trajectory_metadata,
-            claims_by_trajectory=claims_by_trajectory,
-        )
-        metadata_signal_count += int(bool(profile.get("has_metadata_signals")))
-        scored.append((float(profile.get("final_score") or 0.0), trajectory_id, profile))
-    sorted_scored = sorted(scored, key=lambda item: (-item[0], item[1]))
-    ranked = [
-        trajectory_id
-        for _, trajectory_id, _ in sorted_scored
-    ]
-    compact_rows = [
-        _direct_compact_score_row(
-            profile,
-            rank=rank,
-            trajectory_refs=trajectory_refs,
-            trajectory_lengths=trajectory_lengths,
-        )
-        for rank, (_, _, profile) in enumerate(sorted_scored[:DIRECT_TRAJECTORY_DIAGNOSTIC_TOP_N], start=1)
-    ]
-    scoring_mode = "metadata_lexical_v1" if metadata_signal_count else "fallback_text"
-    return ranked, scoring_mode, compact_rows
 
 
 def _direct_cutoff_minimums(

@@ -24,6 +24,9 @@ JudgeConcurrency = Literal["auto"] | int
 MemoryExtractBatchSize = Literal["auto"] | int
 RetrievalExpansionMode = Literal["update_linked_plus_neighbors", "neighbors_only", "none"]
 OpenAICompatibleStructuredMode = Literal["vllm", "openai_json_schema", "text_json"]
+RetrievalRankSaveMode = Literal["top-n", "full"]
+CostCallSaveMode = Literal["summary", "compact"]
+AuditPacketSaveMode = Literal["summary", "compact"]
 
 
 DATASET_SUBSET_OPTIONS = {
@@ -80,6 +83,27 @@ def _normalize_cuda_preflight_mode(value: str) -> CudaPreflightMode:
     raise ValueError("cuda_preflight_mode must be one of: off, warn, strict.")
 
 
+def _normalize_retrieval_rank_save_mode(value: str) -> RetrievalRankSaveMode:
+    normalized = str(value or "top-n").strip().lower().replace("_", "-")
+    if normalized in {"top-n", "full"}:
+        return normalized  # type: ignore[return-value]
+    raise ValueError("retrieval_rank_save_mode must be one of: top-n, full.")
+
+
+def _normalize_cost_call_save_mode(value: str) -> CostCallSaveMode:
+    normalized = str(value or "summary").strip().lower().replace("_", "-")
+    if normalized in {"summary", "compact"}:
+        return normalized  # type: ignore[return-value]
+    raise ValueError("cost_call_save_mode must be one of: summary, compact.")
+
+
+def _normalize_audit_packet_save_mode(value: str) -> AuditPacketSaveMode:
+    normalized = str(value or "summary").strip().lower().replace("_", "-")
+    if normalized in {"summary", "compact"}:
+        return normalized  # type: ignore[return-value]
+    raise ValueError("audit_packet_save_mode must be one of: summary, compact.")
+
+
 class RunConfig(BaseModel):
     """Top-level runtime configuration."""
 
@@ -129,6 +153,17 @@ class RunConfig(BaseModel):
     cuda_preflight_mode: CudaPreflightMode = "warn"
     cuda_preflight_reserve_gb: float = Field(default=2.0, ge=0.0)
     cuda_preflight_report: bool = True
+    ablation_diagnostics: bool = False
+    retrieval_rank_save_mode: RetrievalRankSaveMode = "top-n"
+    retrieval_rank_save_limit: int = Field(default=100, ge=1)
+    offline_context_budgets: str = "4000,8000,16000,32000"
+    offline_rank_cutoffs: str = "5,10,15,20,30,50"
+    cost_diagnostics: bool = False
+    cost_call_save_mode: CostCallSaveMode = "summary"
+    cost_price_config: Path | None = None
+    future_query_counts: str = "1,2,5,10,20,50,100"
+    auditability_diagnostics: bool = False
+    audit_packet_save_mode: AuditPacketSaveMode = "summary"
     episodic_match_threshold: float = 0.72
     export_jsonl: bool = True
     verbose: bool = False
@@ -184,8 +219,17 @@ class RunConfig(BaseModel):
                 self.openai_compatible_structured_mode
             )
             self.cuda_preflight_mode = _normalize_cuda_preflight_mode(self.cuda_preflight_mode)
+            self.retrieval_rank_save_mode = _normalize_retrieval_rank_save_mode(
+                self.retrieval_rank_save_mode
+            )
+            self.cost_call_save_mode = _normalize_cost_call_save_mode(self.cost_call_save_mode)
+            self.audit_packet_save_mode = _normalize_audit_packet_save_mode(
+                self.audit_packet_save_mode
+            )
             if self.database_path is not None:
                 self.database_path = self.database_path.expanduser().resolve()
+            if self.cost_price_config is not None:
+                self.cost_price_config = self.cost_price_config.expanduser().resolve()
             if self.index_database_path is None:
                 self.index_database_path = self.output_dir / "trajpatch_index.sqlite"
             self.index_database_path = self.index_database_path.expanduser().resolve()
@@ -250,8 +294,19 @@ class RunConfig(BaseModel):
             values["cuda_preflight_mode"] = _normalize_cuda_preflight_mode(
                 values.get("cuda_preflight_mode", "warn")
             )
+            values["retrieval_rank_save_mode"] = _normalize_retrieval_rank_save_mode(
+                values.get("retrieval_rank_save_mode", "top-n")
+            )
+            values["cost_call_save_mode"] = _normalize_cost_call_save_mode(
+                values.get("cost_call_save_mode", "summary")
+            )
+            values["audit_packet_save_mode"] = _normalize_audit_packet_save_mode(
+                values.get("audit_packet_save_mode", "summary")
+            )
             if values.get("database_path") is not None:
                 values["database_path"] = values["database_path"].expanduser().resolve()
+            if values.get("cost_price_config") is not None:
+                values["cost_price_config"] = values["cost_price_config"].expanduser().resolve()
             if values.get("index_database_path") is None:
                 values["index_database_path"] = values["output_dir"] / "trajpatch_index.sqlite"
             values["index_database_path"] = values["index_database_path"].expanduser().resolve()

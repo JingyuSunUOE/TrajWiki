@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Callable, Iterable
 
+from trajpatch.analysis.context_cost import estimate_context_tokens, token_breakdown
 from trajpatch.prompts import load_prompt
 from trajpatch.providers.base import LLMProvider
 from trajpatch.providers.structured_outputs import (
@@ -292,6 +293,9 @@ class RetrievalEngine:
         retrieval_expansion_mode: str = "update_linked_plus_neighbors",
         trace: Callable[[str], None] | None = None,
         llm_provider: LLMProvider | None = None,
+        ablation_diagnostics_enabled: bool = False,
+        retrieval_rank_save_mode: str = "top-n",
+        retrieval_rank_save_limit: int = 100,
     ) -> None:
         self.store = store
         self.embedding_provider = embedding_provider
@@ -304,6 +308,10 @@ class RetrievalEngine:
         self.retrieval_expansion_mode = retrieval_expansion_mode
         self.trace = trace
         self._sample_entity_lexicon_cache: dict[str, dict[str, str]] = {}
+        self.ablation_diagnostics_enabled = bool(ablation_diagnostics_enabled)
+        normalized_rank_mode = str(retrieval_rank_save_mode or "top-n").strip().casefold().replace("_", "-")
+        self.retrieval_rank_save_mode = "full" if normalized_rank_mode == "full" else "top-n"
+        self.retrieval_rank_save_limit = max(int(retrieval_rank_save_limit or 100), 1)
 
     @staticmethod
     def _source_sort_key(message: RawMessageRecord | None, message_id: str) -> tuple[int, str]:
@@ -791,6 +799,211 @@ class RetrievalEngine:
                 sorted(set(str(value) for value in list(coverage_profile.get("facet_values") or [])))
             ),
         }
+
+    def _saved_rank_limit(self, total_count: int, *, default_limit: int) -> int:
+        total_count = max(int(total_count), 0)
+        if not self.ablation_diagnostics_enabled:
+            return min(default_limit, total_count)
+        if self.retrieval_rank_save_mode == "full":
+            return total_count
+        return min(self.retrieval_rank_save_limit, total_count)
+
+    def _configured_rank_limit_label(self, total_count: int, *, default_limit: int) -> int:
+        if not self.ablation_diagnostics_enabled:
+            return int(default_limit)
+        if self.retrieval_rank_save_mode == "full":
+            return max(int(total_count), 0)
+        return self.retrieval_rank_save_limit
+
+    def _ablation_rank_limit(self, total_count: int) -> int:
+        if not self.ablation_diagnostics_enabled:
+            return 0
+        if self.retrieval_rank_save_mode == "full":
+            return max(int(total_count), 0)
+        return min(self.retrieval_rank_save_limit, max(int(total_count), 0))
+
+    def _ablation_page_ranked_row(
+        self,
+        item: dict[str, object],
+        rank: int,
+        *,
+        selected_page_ids: set[str] | None = None,
+    ) -> dict[str, object]:
+        trajectory_ids = [str(value) for value in list(item.get("trajectory_ids") or []) if str(value).strip()]
+        fused_score = float(item.get("fused_score") or 0.0)
+        return {
+            "rank": rank,
+            "item_id": str(item.get("page_id") or ""),
+            "item_type": "wiki_page",
+            "page_id": str(item.get("page_id") or ""),
+            "page_type": str(item.get("page_type") or ""),
+            "title": str(item.get("title") or ""),
+            "score": fused_score,
+            "fused_score": fused_score,
+            "score_components": {
+                "dense_score": float(item.get("dense_score") or 0.0),
+                "sparse_score": float(item.get("sparse_score") or 0.0),
+                "entity_bonus": float(item.get("entity_bonus") or 0.0),
+                "reflection_bonus": float(item.get("reflection_bonus") or 0.0),
+                "page_granularity_adjustment": float(item.get("page_granularity_adjustment") or 0.0),
+                "page_family_match_score": float(item.get("page_family_match_score") or 0.0),
+                "page_family_mismatch_penalty": float(item.get("page_family_mismatch_penalty") or 0.0),
+            },
+            "linked_trajectory_ids": trajectory_ids,
+            "trajectory_ids": trajectory_ids,
+            "source_message_ids": [],
+            "source_refs": [],
+            "snapshot_ids": [],
+            "estimated_tokens": estimate_context_tokens(
+                " ".join(
+                    [
+                        str(item.get("title") or ""),
+                        str(item.get("routing_text") or ""),
+                        " ".join(str(value) for value in list(item.get("exact_terms") or [])),
+                    ]
+                )
+            ),
+            "kept_in_final_context": (
+                str(item.get("page_id") or "") in selected_page_ids if selected_page_ids is not None else False
+            ),
+        }
+
+    def _ablation_trajectory_ranked_row(
+        self,
+        item: dict[str, object],
+        rank: int,
+        *,
+        selected_trajectory_ids: set[str] | None = None,
+    ) -> dict[str, object]:
+        trajectory_id = str(item.get("trajectory_id") or "")
+        fused_score = float(item.get("fused_score") or 0.0)
+        source_refs = [str(value) for value in list(item.get("source_event_matched_refs") or []) if str(value).strip()]
+        return {
+            "rank": rank,
+            "item_id": trajectory_id,
+            "item_type": "trajectory",
+            "trajectory_id": trajectory_id,
+            "score": fused_score,
+            "fused_score": fused_score,
+            "score_components": {
+                "dense_score": float(item.get("dense_score") or 0.0),
+                "sparse_score": float(item.get("sparse_score") or 0.0),
+                "summary_similarity": float(item.get("summary_similarity") or 0.0),
+                "latest_similarity": float(item.get("latest_similarity") or 0.0),
+                "entity_match_boost": float(item.get("entity_match_boost") or 0.0),
+                "facet_tag_boost": float(item.get("facet_tag_boost") or 0.0),
+                "facet_value_boost": float(item.get("facet_value_boost") or 0.0),
+                "answer_family_match_score": float(item.get("answer_family_match_score") or 0.0),
+                "answer_family_mismatch_penalty": float(item.get("answer_family_mismatch_penalty") or 0.0),
+                "source_event_match_score": float(item.get("source_event_match_score") or 0.0),
+            },
+            "linked_trajectory_ids": [trajectory_id] if trajectory_id else [],
+            "source_message_ids": [],
+            "source_refs": source_refs,
+            "snapshot_ids": [],
+            "estimated_tokens": estimate_context_tokens(
+                " ".join(
+                    [
+                        str(item.get("summary_text") or ""),
+                        " ".join(str(value) for value in list(item.get("exact_terms") or [])),
+                        " ".join(str(value) for value in list(item.get("summary_keywords") or [])),
+                        " ".join(str(value) for value in list(item.get("historical_item_terms") or [])),
+                    ]
+                )
+            ),
+            "kept_in_final_context": (
+                trajectory_id in selected_trajectory_ids if selected_trajectory_ids is not None else False
+            ),
+        }
+
+    def _ablation_snapshot_candidate_rows(
+        self,
+        snapshots: list[EpisodicMemorySnapshot],
+        *,
+        kept_snapshot_ids: set[str],
+        seed_snapshot_ids: set[str],
+        update_linked_snapshot_ids: set[str],
+        neighbor_snapshot_ids: set[str],
+    ) -> list[dict[str, object]]:
+        rows: list[dict[str, object]] = []
+        seen: set[str] = set()
+        for rank, snapshot in enumerate(snapshots, start=1):
+            if snapshot.id in seen:
+                continue
+            seen.add(snapshot.id)
+            if snapshot.id in seed_snapshot_ids:
+                source_stage = "seed"
+            elif snapshot.id in update_linked_snapshot_ids:
+                source_stage = "update_linked"
+            elif snapshot.id in neighbor_snapshot_ids:
+                source_stage = "neighbor"
+            else:
+                source_stage = "candidate"
+            rows.append(
+                {
+                    "rank": rank,
+                    "item_id": snapshot.id,
+                    "item_type": "snapshot",
+                    "snapshot_id": snapshot.id,
+                    "trajectory_id": snapshot.trajectory_id,
+                    "snapshot_version": int(snapshot.version),
+                    "score": None,
+                    "fused_score": None,
+                    "score_components": {"source_stage": source_stage},
+                    "linked_trajectory_ids": [snapshot.trajectory_id],
+                    "source_message_ids": [],
+                    "source_refs": [],
+                    "snapshot_ids": [snapshot.id],
+                    "estimated_tokens": estimate_context_tokens(
+                        " ".join([snapshot.summary_content or "", snapshot.context or "", snapshot.semantic_text or ""])
+                    ),
+                    "kept_in_final_context": snapshot.id in kept_snapshot_ids,
+                }
+            )
+        return rows
+
+    def _ablation_source_candidate_rows(
+        self,
+        *,
+        source_ids: list[str],
+        source_by_id: dict[str, RawMessageRecord],
+        kept_source_ids: set[str],
+        source_group_ids: dict[str, object],
+    ) -> list[dict[str, object]]:
+        grouped_source_ids: dict[str, set[str]] = {}
+        for group, ids in source_group_ids.items():
+            grouped_source_ids[str(group)] = {str(item) for item in list(ids or []) if str(item).strip()}
+        rows: list[dict[str, object]] = []
+        seen: set[str] = set()
+        for rank, source_id in enumerate([str(item) for item in source_ids if str(item).strip()], start=1):
+            if source_id in seen:
+                continue
+            seen.add(source_id)
+            message = source_by_id.get(source_id)
+            source_ref = self._source_ref_label(message) if message is not None else ""
+            source_groups = [
+                group
+                for group, ids in grouped_source_ids.items()
+                if source_id in ids
+            ]
+            rows.append(
+                {
+                    "rank": rank,
+                    "item_id": source_id,
+                    "item_type": "source_message",
+                    "source_message_id": source_id,
+                    "score": None,
+                    "fused_score": None,
+                    "score_components": {"source_groups": source_groups},
+                    "linked_trajectory_ids": [],
+                    "source_message_ids": [source_id],
+                    "source_refs": [source_ref] if source_ref and source_ref != "no-ref" else [],
+                    "snapshot_ids": [],
+                    "estimated_tokens": estimate_context_tokens(message.content if message is not None else ""),
+                    "kept_in_final_context": source_id in kept_source_ids,
+                }
+            )
+        return rows
 
     @classmethod
     def _page_cutoff_universe_diagnostics(
@@ -2796,9 +3009,17 @@ class RetrievalEngine:
                 }
             )
         fused = self._fuse_dense_sparse_scores(scored, id_key="page_id")
+        diagnostic_page_limit = self._saved_rank_limit(
+            len(fused),
+            default_limit=self.DIAGNOSTIC_TOP_N_PAGES,
+        )
+        diagnostic_page_limit_label = self._configured_rank_limit_label(
+            len(fused),
+            default_limit=self.DIAGNOSTIC_TOP_N_PAGES,
+        )
         page_ranked_rows_compact_top_n = [
             self._compact_page_ranked_row(item, index + 1)
-            for index, item in enumerate(fused[: self.DIAGNOSTIC_TOP_N_PAGES])
+            for index, item in enumerate(fused[:diagnostic_page_limit])
         ]
         page_cutoff_universe_diagnostics = self._page_cutoff_universe_diagnostics(
             page_ranked_rows_compact_top_n,
@@ -2941,6 +3162,8 @@ class RetrievalEngine:
             f"histogram={selected_page_trajectory_count_histogram}"
         )
         metadata = {
+            "retrieval_rank_save_mode": self.retrieval_rank_save_mode,
+            "retrieval_rank_save_limit": self.retrieval_rank_save_limit,
             "page_candidate_ids": [str(item["page_id"]) for item in candidate_pool],
             "page_rerank_selected_ids": list(reranked_ids),
             "page_rerank_rationales": rerank_rationales,
@@ -2977,11 +3200,19 @@ class RetrievalEngine:
             "non_index_page_count": len(non_index_pages),
             "page_rerank_error_type": rerank_error_metadata.get("rerank_error_type"),
             "page_rerank_error_message": rerank_error_metadata.get("rerank_error_message"),
-            "diagnostic_top_n_pages": self.DIAGNOSTIC_TOP_N_PAGES,
+            "diagnostic_top_n_pages": diagnostic_page_limit_label,
             "page_ranked_total_count": len(fused),
             "page_ranked_rows_truncated": len(fused) > len(page_ranked_rows_compact_top_n),
             "page_ranked_rows_compact_top_n": page_ranked_rows_compact_top_n,
             "page_cutoff_universe_diagnostics": page_cutoff_universe_diagnostics,
+            "ablation_page_ranked_rows_v1": [
+                self._ablation_page_ranked_row(
+                    item,
+                    index + 1,
+                    selected_page_ids=set(selected_ids),
+                )
+                for index, item in enumerate(fused[: self._ablation_rank_limit(len(fused))])
+            ],
             "page_ranked_rows": [
                 {
                     "page_id": str(item["page_id"]),
@@ -3212,9 +3443,17 @@ class RetrievalEngine:
             query_entity_keys=query_entity_keys,
             query_facet_values=query_facet_value_keys,
         )
+        diagnostic_trajectory_limit = self._saved_rank_limit(
+            len(fused),
+            default_limit=self.DIAGNOSTIC_TOP_N_TRAJECTORIES,
+        )
+        diagnostic_trajectory_limit_label = self._configured_rank_limit_label(
+            len(fused),
+            default_limit=self.DIAGNOSTIC_TOP_N_TRAJECTORIES,
+        )
         trajectory_ranked_rows_compact_top_n = [
             self._compact_trajectory_ranked_row(item, index + 1)
-            for index, item in enumerate(fused[: self.DIAGNOSTIC_TOP_N_TRAJECTORIES])
+            for index, item in enumerate(fused[:diagnostic_trajectory_limit])
         ]
         trajectory_selection_pool_rows_compact = [
             self._compact_trajectory_ranked_row(item, index + 1)
@@ -3224,6 +3463,8 @@ class RetrievalEngine:
             trajectory_ranked_rows_compact_top_n
         )
         metadata = {
+            "retrieval_rank_save_mode": self.retrieval_rank_save_mode,
+            "retrieval_rank_save_limit": self.retrieval_rank_save_limit,
             "trajectory_candidate_pool_ids": [str(item["trajectory_id"]) for item in rerank_pool],
             "trajectory_selection_pool_ids": [str(item["trajectory_id"]) for item in selection_pool],
             "trajectory_selection_pool_size": len(selection_pool),
@@ -3312,11 +3553,19 @@ class RetrievalEngine:
             },
             "trajectory_rerank_error_type": rerank_error_metadata.get("rerank_error_type"),
             "trajectory_rerank_error_message": rerank_error_metadata.get("rerank_error_message"),
-            "diagnostic_top_n_trajectories": self.DIAGNOSTIC_TOP_N_TRAJECTORIES,
+            "diagnostic_top_n_trajectories": diagnostic_trajectory_limit_label,
             "trajectory_ranked_total_count": len(fused),
             "trajectory_ranked_rows_truncated": len(fused) > len(trajectory_ranked_rows_compact_top_n),
             "trajectory_ranked_rows_compact_top_n": trajectory_ranked_rows_compact_top_n,
             "trajectory_cutoff_prefix_diagnostics": trajectory_cutoff_diagnostics,
+            "ablation_trajectory_ranked_rows_v1": [
+                self._ablation_trajectory_ranked_row(
+                    item,
+                    index + 1,
+                    selected_trajectory_ids=set(selected_ids),
+                )
+                for index, item in enumerate(fused[: self._ablation_rank_limit(len(fused))])
+            ],
             "trajectory_ranked_rows": [
                 {
                     "trajectory_id": str(item["trajectory_id"]),
@@ -4636,9 +4885,53 @@ class RetrievalEngine:
             context_blocks.append("## Temporal Anchors\n" + "\n".join(temporal_anchor_lines))
         if conflict_lines:
             context_blocks.append("## Conflict Block\n" + "\n".join(f"- {line}" for line in conflict_lines))
+        if self.ablation_diagnostics_enabled:
+            ablation_snapshot_candidate_rows = self._ablation_snapshot_candidate_rows(
+                raw_expanded,
+                kept_snapshot_ids={
+                    str(item) for item in list(snapshot_compaction_metadata["snapshot_compaction_kept_ids"])
+                },
+                seed_snapshot_ids={str(item) for item in list(expansion_metadata["seed_snapshot_ids"])},
+                update_linked_snapshot_ids={
+                    str(item) for item in list(expansion_metadata["update_linked_snapshot_ids"])
+                },
+                neighbor_snapshot_ids={
+                    str(item) for item in list(expansion_metadata["neighbor_fallback_snapshot_ids"])
+                },
+            )
+            ablation_source_candidate_rows = self._ablation_source_candidate_rows(
+                source_ids=[str(item) for item in list(source_compaction_metadata["raw_source_message_ids"])],
+                source_by_id=source_by_id,
+                kept_source_ids={str(item) for item in source_message_ids},
+                source_group_ids=source_group_ids,
+            )
+            answer_context_token_breakdown = token_breakdown(
+                wiki_pages="\n".join(
+                    f"{row.get('title', '')} {row.get('page_type', '')}"
+                    for row in list(page_metadata.get("selected_page_rows_compact") or [])
+                ),
+                trajectory_summaries="\n".join(str(item) for item in selected_trajectory_ids),
+                snapshots="\n\n".join(episodic_lines),
+                claims="\n".join(
+                    [
+                        *list(dict.fromkeys(grounded_exact_terms)),
+                        *list(dict.fromkeys(grounded_display_items)),
+                        *list(dict.fromkeys(grounded_display_counts)),
+                        *list(dict.fromkeys(grounded_display_key_facts)),
+                    ]
+                ),
+                raw_sources="\n\n".join([*source_blocks, *conflict_lines]),
+                answer_prompt_total="\n\n".join(context_blocks),
+            )
+        else:
+            ablation_snapshot_candidate_rows = []
+            ablation_source_candidate_rows = []
+            answer_context_token_breakdown = {}
         latency_ms = (time.perf_counter() - started_at) * 1000.0
         metadata = {
             "retrieval_attempt_label": attempt_label,
+            "retrieval_rank_save_mode": self.retrieval_rank_save_mode,
+            "retrieval_rank_save_limit": self.retrieval_rank_save_limit,
             "retrieval_reflection_used": attempt_label == "reflection",
             "retrieval_reflection_stage": (
                 "raw" if bool(raw_rescue_metadata.get("raw_rescue_attempted")) else (
@@ -4695,6 +4988,7 @@ class RetrievalEngine:
             "page_covered_query_facet_values": page_metadata["page_covered_query_facet_values"],
             "page_covered_query_terms": page_metadata["page_covered_query_terms"],
             "page_ranked_rows": page_metadata["page_ranked_rows"],
+            "ablation_page_ranked_rows_v1": page_metadata.get("ablation_page_ranked_rows_v1", []),
             "diagnostic_top_n_pages": page_metadata.get("diagnostic_top_n_pages"),
             "page_ranked_total_count": page_metadata.get("page_ranked_total_count"),
             "page_ranked_rows_truncated": page_metadata.get("page_ranked_rows_truncated"),
@@ -4757,6 +5051,9 @@ class RetrievalEngine:
                 "trajectory_source_event_query_profile", {}
             ),
             "trajectory_ranked_rows": trajectory_metadata["trajectory_ranked_rows"],
+            "ablation_trajectory_ranked_rows_v1": trajectory_metadata.get(
+                "ablation_trajectory_ranked_rows_v1", []
+            ),
             "diagnostic_top_n_trajectories": trajectory_metadata.get("diagnostic_top_n_trajectories"),
             "trajectory_ranked_total_count": trajectory_metadata.get("trajectory_ranked_total_count"),
             "trajectory_ranked_rows_truncated": trajectory_metadata.get("trajectory_ranked_rows_truncated"),
@@ -4802,6 +5099,9 @@ class RetrievalEngine:
             **temporal_anchor_metadata,
             "source_message_backtrack_count": source_compaction_metadata["source_message_backtrack_count"],
             "source_message_backtrack_rate": source_compaction_metadata["source_message_backtrack_rate"],
+            "ablation_snapshot_candidate_rows_v1": ablation_snapshot_candidate_rows,
+            "ablation_source_candidate_rows_v1": ablation_source_candidate_rows,
+            "answer_context_token_breakdown_v1": answer_context_token_breakdown,
             "answer_context_active_claim_count": answer_context_active_claim_count,
             "answer_context_uncertain_claim_count": answer_context_uncertain_claim_count,
             "answer_context_suppressed_deprecated_claim_count": answer_context_suppressed_deprecated_claim_count,

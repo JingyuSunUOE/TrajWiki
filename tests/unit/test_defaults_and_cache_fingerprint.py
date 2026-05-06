@@ -32,6 +32,12 @@ def test_run_config_defaults_use_output_dir(tmp_path: Path) -> None:
     assert config.output_dir == Path("output").expanduser().resolve()
     assert config.index_database_path == Path("output/trajpatch_index.sqlite").expanduser().resolve()
     assert config.rebuild_semantic_metric_cache is False
+    assert config.ablation_diagnostics is False
+    assert config.cost_diagnostics is False
+    assert config.auditability_diagnostics is False
+    assert config.retrieval_rank_save_mode == "top-n"
+    assert config.cost_call_save_mode == "summary"
+    assert config.audit_packet_save_mode == "summary"
 
 
 @pytest.mark.skipif(CliRunner is None, reason="typer is not installed in the current test environment")
@@ -41,6 +47,23 @@ def test_cli_help_defaults_do_not_reference_previous_output() -> None:
     assert result.exit_code == 0
     assert "previous_output" not in result.stdout
     assert "semantic metric" in result.stdout
+    audit_result = CliRunner().invoke(app, ["analyze-auditability", "--help"])
+    assert audit_result.exit_code == 0
+    assert "audit-labels" in audit_result.stdout
+
+
+def test_local_backbone_rejects_sharded_workers(tmp_path: Path) -> None:
+    dataset_path = tmp_path / "dataset.json"
+    dataset_path.write_text("[]", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="conv_workers > 1"):
+        RunConfig(
+            dataset="locomo",
+            dataset_path=dataset_path,
+            provider_kind="local",
+            backbone_provider_kind="local",
+            conv_workers=2,
+        )
 
 
 def test_memory_cache_fingerprint_covers_current_memory_prompts() -> None:
