@@ -20,7 +20,7 @@ from trajpatch.memory.trajectory_summaries import sanitize_summary_keyword_value
 from trajpatch.prompts import load_prompt
 from trajpatch.providers.base import EmbeddingProvider, LLMProvider
 from trajpatch.storage.models import EmbeddingRecord, TrajectoryRecord, WikiPageRecord
-from trajpatch.storage.repository import TrajPatchStore
+from trajpatch.storage.repository import TrajWikiStore
 from trajpatch.types import NormalizedMessage
 from trajpatch.utils.text import collapse_whitespace, extract_keywords
 
@@ -365,7 +365,7 @@ class WikiCompiler:
 
     def __init__(
         self,
-        store: TrajPatchStore,
+        store: TrajWikiStore,
         llm_provider: LLMProvider,
         embedding_provider: EmbeddingProvider,
         *,

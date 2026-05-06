@@ -1,16 +1,13 @@
-# TrajPatch
+# TrajWiki
 
-TrajPatch is an offline benchmark framework for long-memory question answering. It builds
+TrajWiki is an offline benchmark framework for long-memory question answering. It builds
 source-grounded episodic memory trajectories, compiles a per-sample wiki routing layer,
 retrieves compact evidence, generates grounded answers, and stores detailed diagnostics for
 failure analysis.
 
-The CLI package is named `trajpatch`. The memory architecture is referred to as
-**TrajWiki** in code, artifacts, and paper-facing analysis.
-
 ## What The Pipeline Does
 
-For each logical sample, TrajPatch runs a fixed memory-and-evaluation pipeline:
+For each logical sample, TrajWiki runs a fixed memory-and-evaluation pipeline:
 
 1. Load LOCOMO or MedMT data and group rows into logical samples.
 2. Convert conversation history into episodic snapshots and source-linked claims.
@@ -171,8 +168,8 @@ PYTHONPATH=src python -m trajpatch benchmark-locomo \
 
 This is the recommended local-model path for running Qwen or other local chat models.
 vLLM exposes the model through an OpenAI-compatible API. For Qwen3 reasoning models,
-prefer TrajPatch `text_json` mode: it avoids vLLM guided-JSON engine crashes and the
-TrajPatch text parsers tolerate Qwen `<think>` reasoning preambles. Use `vllm` structured
+prefer TrajWiki `text_json` mode: it avoids vLLM guided-JSON engine crashes and the
+TrajWiki text parsers tolerate Qwen `<think>` reasoning preambles. Use `vllm` structured
 mode only after validating that the specific model and vLLM release can handle guided JSON
 schemas under your target concurrency.
 
@@ -191,7 +188,7 @@ vllm serve Qwen/Qwen3-8B \
   --generation-config vllm
 ```
 
-Then run TrajPatch against that endpoint:
+Then run TrajWiki against that endpoint:
 
 ```bash
 PYTHONPATH=src python -m trajpatch benchmark-locomo \
@@ -222,7 +219,7 @@ PYTHONPATH=src python -m trajpatch benchmark-locomo \
   --verbose
 ```
 
-Option 2: let TrajPatch start and stop vLLM for this run:
+Option 2: let TrajWiki start and stop vLLM for this run:
 
 ```bash
 PYTHONPATH=src python -m trajpatch benchmark-locomo \
@@ -265,7 +262,7 @@ the process it started. Use `--vllm-keep-alive` to leave the launched server run
 
 ### LOCOMO With Bare Local Transformers
 
-This mode loads the Hugging Face model inside the TrajPatch process. It is useful for
+This mode loads the Hugging Face model inside the TrajWiki process. It is useful for
 debugging but less reliable for structured outputs than `openai-compatible`.
 
 ```bash
@@ -414,7 +411,7 @@ Provider behavior:
 - `--vllm-keep-alive`: keep an autostarted vLLM process alive after the benchmark.
 
 Remote runs never need vLLM. Bare local Transformers runs also do not need vLLM, because
-they load the model directly in the TrajPatch process.
+they load the model directly in the TrajWiki process.
 
 ## Outputs
 
@@ -604,7 +601,7 @@ Recommended reading order for new contributors:
 
 ## Design Notes
 
-TrajPatch separates routing artifacts from answer evidence:
+TrajWiki separates routing artifacts from answer evidence:
 
 - Wiki pages and trajectory summaries help find the right memory region.
 - Compacted snapshots provide structured answer context.

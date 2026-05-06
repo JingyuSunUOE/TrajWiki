@@ -1,4 +1,4 @@
-"""Database setup utilities for TrajPatch."""
+"""Database setup utilities for TrajWiki."""
 
 from __future__ import annotations
 

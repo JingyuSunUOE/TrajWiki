@@ -276,7 +276,7 @@ Rules:
 3. supporting_source_refs must use only visible refs such as D8:4, and each ref must support the requested answer family.
 4. Count distinct completed events only. Exclude future plans, intentions, reactions, duplicate mentions, general hobbies, and uncertain candidates.
 5. Count final_answer must be natural language, not a bare number; use an exact count only when complete evidence supports it, otherwise state a retrieved-evidence lower bound.
-6. Date/time answers must use source line date=... fields, snapshot Timestamp lines, and the ## Temporal Anchors block; resolve terms such as "yesterday" to the grounded date when available.
+6. Date/time answers must use source line date=... fields, snapshot Timestamp lines, and the ## Temporal Anchors block; resolve terms such as "yesterday", "one year ago", "last month", or "last Friday" to the grounded Temporal Anchor target when available.
 7. For lists/events/preferences, include every in-scope source-backed specific item and avoid scope-mismatched extras.
 8. For bridge/alias facts, answer with the concrete source-backed value, e.g. "West County" rather than "old area".
 
@@ -294,8 +294,9 @@ Rules:
 1. Grounding: use only retrieved evidence; if unsupported, write exactly "Answer: The retrieved context does not support an answer to this question."
 2. Form: answer the requested type directly. Dates need a date/time value, counts need a supported natural-language count, and places/people need the concrete entity.
 3. Specificity: preserve exact source terms for names, titles, places, dates, counts, activities, and items; prefer specific items over broad categories.
-4. Coverage: for list/event/preference questions, include all in-scope supported items and omit unsupported or scope-mismatched extras.
-5. Keep the answer concise; put only the source-grounded reason in Rationale.
+4. Temporal Anchors: if a source uses relative time such as "last week", "last Friday", "last month", "last year", or "one year ago", answer with the resolved Temporal Anchor target; do not collapse it to the source message date.
+5. Coverage: for list/event/preference questions, include all in-scope supported items and omit unsupported or scope-mismatched extras.
+6. Keep the answer concise; put only the source-grounded reason in Rationale.
 """
 
 LOCOMO_ANSWER_TYPE_VERIFICATION_PROMPT = """TASK=LOCOMO_ANSWER_TYPE_VERIFICATION
@@ -325,7 +326,7 @@ Input contains the question, expected answer type, repair issue, both candidate 
 Rules:
 1. Do not write a new answer. Choose only keep_initial, use_repair, or safe_abstain.
 2. Use only supplied evidence signals; do not use gold answers, judge labels, metrics, or outside knowledge.
-3. For date/time questions, prefer explicit resolved dates over relative phrases such as yesterday, last week, recently, or this month.
+3. For date/time questions, prefer the explicit resolved Temporal Anchor target. If the target is a span, month-year, year, or fuzzy relative phrase, preserve that target and do not collapse it to the anchor/source date.
 4. Reject a repaired answer if it drops a source-backed date, count, place, person, boolean value, bridge target, or required list item from the initial answer.
 5. Use the repaired answer only when it better matches the question type/scope and remains source-supported.
 6. Choose safe_abstain only when neither candidate is supported by the supplied evidence.
@@ -361,7 +362,8 @@ Rules:
 3. Apply the repair instruction: remove unsupported extras, wrong counts, wrong answer type, or scope-mismatched items.
 4. If SUPPORTED_LIST_ITEMS contains in-scope answers, include them without adding unsupported items.
 5. If a source-backed bridge value is supplied, use the concrete value instead of the alias.
-6. If supported values do not answer the question, return a brief natural-language abstention.
+6. For date/time repairs, use TEMPORAL_CANDIDATES resolved_answer_text as the answer target when present; do not replace relative targets with source dates.
+7. If supported values do not answer the question, return a brief natural-language abstention.
 """
 
 # Prompt used for episodic trajectory retrieval summary generation.

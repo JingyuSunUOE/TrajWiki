@@ -4,7 +4,7 @@ from trajpatch.memory.retrieval import RetrievalEngine
 from trajpatch.memory.wiki import WikiCompiler, WikiPageDraft
 from trajpatch.providers.mock import HashEmbeddingProvider, MockLLMProvider
 from trajpatch.storage.models import WikiPageRecord
-from trajpatch.storage.repository import TrajPatchStore
+from trajpatch.storage.repository import TrajWikiStore
 
 
 class _KeywordPageEmbeddingProvider(HashEmbeddingProvider):
@@ -33,7 +33,7 @@ class _KeywordPageEmbeddingProvider(HashEmbeddingProvider):
 
 
 def _add_trajectory(
-    store: TrajPatchStore,
+    store: TrajWikiStore,
     *,
     sample_id: str,
     dataset_name: str = "locomo",
@@ -59,7 +59,7 @@ def _add_trajectory(
     store.session.flush()
 
 
-def test_wiki_compiler_splits_broad_entity_into_facet_pages(store: TrajPatchStore) -> None:
+def test_wiki_compiler_splits_broad_entity_into_facet_pages(store: TrajWikiStore) -> None:
     sample_id = "sample-broad-entity-facets"
     groups = [
         ("relationship_status=single", "single status"),
@@ -104,7 +104,7 @@ def test_wiki_compiler_splits_broad_entity_into_facet_pages(store: TrajPatchStor
     assert any("adoption agencies" in seed.title.casefold() for seed in facet_seeds)
 
 
-def test_wiki_compiler_splits_broad_entity_without_facet_values(store: TrajPatchStore) -> None:
+def test_wiki_compiler_splits_broad_entity_without_facet_values(store: TrajWikiStore) -> None:
     sample_id = "sample-broad-entity-no-facets"
     for index in range(25):
         _add_trajectory(
@@ -132,7 +132,7 @@ def test_wiki_compiler_splits_broad_entity_without_facet_values(store: TrajPatch
     assert any("pottery bowl" in seed.title.casefold() for seed in facet_seeds)
 
 
-def test_wiki_compiler_traces_invalid_plan_and_invalid_markdown(store: TrajPatchStore) -> None:
+def test_wiki_compiler_traces_invalid_plan_and_invalid_markdown(store: TrajWikiStore) -> None:
     sample_id = "sample-wiki-invalid"
     _add_trajectory(store, sample_id=sample_id)
     traces: list[str] = []
@@ -173,7 +173,7 @@ def test_wiki_compiler_traces_invalid_plan_and_invalid_markdown(store: TrajPatch
     assert "## Linked Trajectories" in pages[0].markdown_text
 
 
-def test_wiki_compiler_traces_generation_failures(store: TrajPatchStore) -> None:
+def test_wiki_compiler_traces_generation_failures(store: TrajWikiStore) -> None:
     sample_id = "sample-wiki-failure"
     _add_trajectory(store, sample_id=sample_id)
     traces: list[str] = []
@@ -208,7 +208,7 @@ def test_wiki_compiler_traces_generation_failures(store: TrajPatchStore) -> None
     assert any("wiki_page_compile_done page_id=" in line for line in traces)
 
 
-def test_wiki_compiler_drops_empty_non_index_planner_pages(store: TrajPatchStore) -> None:
+def test_wiki_compiler_drops_empty_non_index_planner_pages(store: TrajWikiStore) -> None:
     sample_id = "sample-wiki-empty-planner-page"
     _add_trajectory(store, sample_id=sample_id, label="pets")
     trajectory_id = store.list_trajectories(sample_id)[0].id
@@ -251,7 +251,7 @@ def test_wiki_compiler_drops_empty_non_index_planner_pages(store: TrajPatchStore
     assert any("wiki_empty_non_index_pages_dropped count=1 slugs=empty-pets" in line for line in traces)
 
 
-def test_wiki_compiler_rewrites_placeholder_linked_section_and_metadata(store: TrajPatchStore) -> None:
+def test_wiki_compiler_rewrites_placeholder_linked_section_and_metadata(store: TrajWikiStore) -> None:
     sample_id = "sample-wiki-placeholder"
     for index in range(10):
         _add_trajectory(
@@ -316,7 +316,7 @@ def test_wiki_compiler_rewrites_placeholder_linked_section_and_metadata(store: T
 
 
 def test_wiki_compiler_sanitizes_internal_summary_format_in_linked_section(
-    store: TrajPatchStore,
+    store: TrajWikiStore,
 ) -> None:
     sample_id = "sample-wiki-linked-sanitize"
     _add_trajectory(
@@ -375,7 +375,7 @@ def test_wiki_compiler_sanitizes_internal_summary_format_in_linked_section(
 
 
 def test_wiki_routing_text_sanitizes_internal_summary_format(
-    store: TrajPatchStore,
+    store: TrajWikiStore,
 ) -> None:
     sample_id = "sample-wiki-routing-sanitize"
     _add_trajectory(
@@ -433,7 +433,7 @@ def test_wiki_routing_text_sanitizes_internal_summary_format(
 
 
 def test_wiki_post_plan_audit_rescues_planner_dropped_trajectories(
-    store: TrajPatchStore,
+    store: TrajWikiStore,
 ) -> None:
     sample_id = "sample-wiki-post-plan-rescue"
     for index in range(8):
@@ -511,7 +511,7 @@ def test_wiki_post_plan_audit_rescues_planner_dropped_trajectories(
     assert not any("wiki_non_index_coverage_incomplete" in line for line in traces)
 
 
-def test_post_plan_rescue_merges_noisy_singletons_into_medium_pages(store: TrajPatchStore) -> None:
+def test_post_plan_rescue_merges_noisy_singletons_into_medium_pages(store: TrajWikiStore) -> None:
     sample_id = "sample-rescue-umbrella-merge"
     terms = [
         ("Caroline", "painted sunset", "sunset painting"),
@@ -588,7 +588,7 @@ def test_singleton_policy_allows_specific_pages_and_rejects_low_quality_descript
     assert rewritten["wiki_descriptor_rewritten"] is True
 
 
-def test_wiki_compiler_splits_overwide_non_index_drafts(store: TrajPatchStore) -> None:
+def test_wiki_compiler_splits_overwide_non_index_drafts(store: TrajWikiStore) -> None:
     compiler = WikiCompiler(store, MockLLMProvider(), HashEmbeddingProvider())
     draft = WikiPageDraft(
         page_type="entity",
@@ -610,7 +610,7 @@ def test_wiki_compiler_splits_overwide_non_index_drafts(store: TrajPatchStore) -
     assert split_drafts[0].metadata["wiki_overwide_original_trajectory_count"] == 10
 
 
-def test_wiki_compiler_synthesizes_evidence_for_planner_derived_page(store: TrajPatchStore) -> None:
+def test_wiki_compiler_synthesizes_evidence_for_planner_derived_page(store: TrajWikiStore) -> None:
     sample_id = "sample-wiki-planner-derived"
     for label, term, summary in [
         (
@@ -711,7 +711,7 @@ def test_wiki_compiler_synthesizes_evidence_for_planner_derived_page(store: Traj
 
 
 def test_wiki_compiler_overwrites_seed_evidence_when_planner_trajectory_ids_differ(
-    store: TrajPatchStore,
+    store: TrajWikiStore,
 ) -> None:
     sample_id = "sample-wiki-stale-seed"
     _add_trajectory(
@@ -779,7 +779,7 @@ def test_wiki_compiler_overwrites_seed_evidence_when_planner_trajectory_ids_diff
     assert enriched.metadata["representative_trajectory_ids"] == [pottery.id]
 
 
-def test_wiki_compiler_synthesizes_metadata_when_no_seed_matches(store: TrajPatchStore) -> None:
+def test_wiki_compiler_synthesizes_metadata_when_no_seed_matches(store: TrajWikiStore) -> None:
     sample_id = "sample-wiki-no-seed"
     _add_trajectory(
         store,
@@ -823,7 +823,7 @@ def test_wiki_compiler_synthesizes_metadata_when_no_seed_matches(store: TrajPatc
     assert draft.metadata["representative_trajectory_ids"] == [trajectory.id]
 
 
-def test_wiki_compiler_splits_broad_entity_seed_and_caps_representatives(store: TrajPatchStore) -> None:
+def test_wiki_compiler_splits_broad_entity_seed_and_caps_representatives(store: TrajWikiStore) -> None:
     sample_id = "sample-wiki-broad"
     seen_representative_counts: list[int] = []
     traces: list[str] = []
@@ -885,7 +885,7 @@ def test_wiki_compiler_splits_broad_entity_seed_and_caps_representatives(store: 
     assert any("wiki_page_compile_done page_id=" in line and "embed_ms=" in line for line in traces)
 
 
-def test_wiki_compiler_suppresses_redundant_topic_seed(store: TrajPatchStore) -> None:
+def test_wiki_compiler_suppresses_redundant_topic_seed(store: TrajWikiStore) -> None:
     sample_id = "sample-wiki-topic-suppression"
     for index in range(2):
         _add_trajectory(
@@ -916,7 +916,7 @@ def test_wiki_compiler_suppresses_redundant_topic_seed(store: TrajPatchStore) ->
     assert not any(page.page_type == "topic" and "origin" in page.slug for page in pages)
 
 
-def test_route_pages_excludes_index_when_non_index_pages_exist(store: TrajPatchStore) -> None:
+def test_route_pages_excludes_index_when_non_index_pages_exist(store: TrajWikiStore) -> None:
     sample_id = "sample-page-routing"
     provider = _KeywordPageEmbeddingProvider()
 
@@ -1002,7 +1002,7 @@ def test_route_pages_excludes_index_when_non_index_pages_exist(store: TrajPatchS
     assert any("page_route_selected_ids pages=wiki-topic trajectory_union=1" in line for line in traces)
 
 
-def test_route_pages_records_rerank_error_and_missing_embedding(store: TrajPatchStore) -> None:
+def test_route_pages_records_rerank_error_and_missing_embedding(store: TrajWikiStore) -> None:
     sample_id = "sample-page-routing-error"
     provider = _KeywordPageEmbeddingProvider()
     page = WikiPageRecord(
@@ -1057,7 +1057,7 @@ def test_route_pages_records_rerank_error_and_missing_embedding(store: TrajPatch
     assert any("page_rerank_failed error_type=RuntimeError" in line for line in traces)
 
 
-def test_select_trajectories_records_rerank_error(store: TrajPatchStore) -> None:
+def test_select_trajectories_records_rerank_error(store: TrajWikiStore) -> None:
     sample_id = "sample-trajectory-rerank-error"
     _add_trajectory(
         store,

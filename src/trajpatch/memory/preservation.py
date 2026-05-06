@@ -136,12 +136,30 @@ _CAR_ACCIDENT_RE = re.compile(
 )
 _TEMPORAL_EXPRESSION_RE = re.compile(
     r"\b("
-    r"yesterday|today|tomorrow|recently|last\s+(?:week|weekend|month|year|night|summer|winter|spring|fall|autumn)|"
+    r"yesterday|today|tomorrow|recently|"
+    r"last\s+(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|week|weekend|month|year|night|summer|winter|spring|fall|autumn)|"
     r"this\s+past\s+weekend|this\s+(?:week|weekend|month|year|summer|winter|spring|fall|autumn)|"
-    r"next\s+(?:week|weekend|month|year)|\d+\s+(?:days?|weeks?|months?|years?)\s+ago"
+    r"next\s+(?:week|weekend|month|year)|"
+    r"(?:about|around)\s+(?:\d+|a|an|one|two|three|four|five|six|seven|eight|nine|ten)\s+years?\s+ago|"
+    r"a\s+few\s+years?\s+ago|"
+    r"(?:\d+|a|an|one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:days?|weeks?|months?|years?)\s+ago"
     r")\b",
     re.IGNORECASE,
 )
+_TEMPORAL_COUNT_WORDS = {
+    "a": 1,
+    "an": 1,
+    "one": 1,
+    "two": 2,
+    "three": 3,
+    "four": 4,
+    "five": 5,
+    "six": 6,
+    "seven": 7,
+    "eight": 8,
+    "nine": 9,
+    "ten": 10,
+}
 _LIST_SPLIT_RE = re.compile(r"\s*(?:,|;|\band\b|\bor\b)\s+", re.IGNORECASE)
 _COUNT_CUE_RE = re.compile(
     r"\b("
@@ -194,15 +212,22 @@ _ACTIVITY_PURPOSE_RE = re.compile(
     r"therapy\s+for\s+me|express\s+myself|get\s+creative|reset|recharge)\b",
     re.IGNORECASE,
 )
+_ACTIVITY_ACTION_RE = re.compile(
+    r"\b(?P<action>start(?:ed|ing)?|began|begin(?:ning)?|try(?:ing|ied)?|practice(?:d|s|ing)?)\s+"
+    r"(?:to\s+)?(?P<object>lift(?:ing)?\s+weights?|weight\s+lifting|weightlifting|working\s+out|exercising)\b",
+    re.IGNORECASE,
+)
 _INSTRUMENT_ACTION_RE = re.compile(
     r"\b(?:plays?|played|learned|learning|practices?|practiced)\s+"
     r"(?:the\s+)?([a-zA-Z][a-zA-Z0-9'’\-\s]{2,50})",
     re.IGNORECASE,
 )
 _SOURCE_SURFACE_TRAILING_RE = re.compile(
-    r"\b(?:last|this|next)\s+(?:weekend|week|month|year|night|summer|winter|spring|fall|autumn)\b.*$"
+    r"\b(?:last|this|next)\s+(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|weekend|week|month|year|night|summer|winter|spring|fall|autumn)\b.*$"
     r"|\b(?:yesterday|today|tomorrow|recently|lately)\b.*$"
-    r"|\b\d+\s+days?\s+ago\b.*$"
+    r"|\b(?:about|around)\s+(?:\d+|a|an|one|two|three|four|five|six|seven|eight|nine|ten)\s+years?\s+ago\b.*$"
+    r"|\ba\s+few\s+years?\s+ago\b.*$"
+    r"|\b(?:\d+|a|an|one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:days?|weeks?|months?|years?)\s+ago\b.*$"
     r"|\s+(?:with|for|because|but|so|when|while|after|before|which|who|that|where|if|though)\b.*$",
     re.IGNORECASE,
 )
@@ -528,6 +553,7 @@ def extract_must_preserve_candidates(
         text = collapse_whitespace(record.content or "")
         if not text:
             continue
+        temporal_expression = _temporal_expression_from_text(text)
         exact_candidates = extract_exact_term_candidates_v1("", [record])
         cleaned_exact_terms = clean_exact_terms_v1(
             exact_candidates,
@@ -667,6 +693,21 @@ def extract_must_preserve_candidates(
             )
             if candidate is not None:
                 candidates.append(candidate)
+        for match in _ACTIVITY_ACTION_RE.finditer(text):
+            raw_surface = collapse_whitespace(match.group("object").strip(" -:,.!?\"'“”‘’"))
+            cleaned_surface = _clean_source_surface(raw_surface, max_tokens=6)
+            candidate = _candidate_from_surface(
+                surface=cleaned_surface,
+                category="activity",
+                record=record,
+                rule="activity_action_temporal_pattern",
+                relation="activity",
+                raw_surface=raw_surface,
+                event_action=match.group("action"),
+                temporal_expression=temporal_expression,
+            )
+            if candidate is not None:
+                candidates.append(candidate)
         for match in _BOOK_TITLE_RE.finditer(text):
             raw_surface = collapse_whitespace(match.group(1).strip(" -:,.!?\"'“”‘’"))
             cleaned_surface = _clean_source_surface(raw_surface, max_tokens=8, preserve_leading_article=True)
@@ -711,7 +752,6 @@ def extract_must_preserve_candidates(
             )
             if candidate is not None:
                 candidates.append(candidate)
-        temporal_expression = _temporal_expression_from_text(text)
         for match in _NETWORKING_EVENT_RE.finditer(text):
             candidate = _event_candidate(
                 record=record,
@@ -897,6 +937,67 @@ def _claim_signal_rows(
     return rows
 
 
+def _temporal_expression_matches(expression: str | None, text: str) -> bool:
+    normalized_expression = collapse_whitespace(expression or "").casefold()
+    normalized_text = collapse_whitespace(text or "").casefold()
+    if not normalized_expression:
+        return True
+    if not normalized_text:
+        return False
+    if re.search(rf"\b{re.escape(normalized_expression)}\b", normalized_text):
+        return True
+    if normalized_expression == "last week":
+        return bool(re.search(r"\b(?:last|previous)\s+week\b|\bweek\s+(?:before|prior\s+to)\b", normalized_text))
+    weekday_match = re.fullmatch(
+        r"last\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday)",
+        normalized_expression,
+    )
+    if weekday_match:
+        weekday = re.escape(weekday_match.group(1))
+        return bool(
+            re.search(
+                rf"\b(?:last|previous)\s+{weekday}\b|\b{weekday}\s+(?:before|prior\s+to)\b",
+                normalized_text,
+            )
+        )
+    match = re.fullmatch(r"last\s+(weekend|month|year|night|summer|winter|spring|fall|autumn)", normalized_expression)
+    if match:
+        unit = re.escape(match.group(1))
+        return bool(re.search(rf"\b(?:last|previous)\s+{unit}\b|\b{unit}\s+(?:before|prior\s+to)\b", normalized_text))
+    fuzzy_match = re.fullmatch(
+        r"(?:(?:about|around)\s+(?:\d+|a|an|one|two|three|four|five|six|seven|eight|nine|ten)\s+years?\s+ago|a\s+few\s+years?\s+ago)",
+        normalized_expression,
+    )
+    if fuzzy_match:
+        return bool(
+            re.search(
+                r"\b(?:(?:about|around)\s+(?:\d+|a|an|one|two|three|four|five|six|seven|eight|nine|ten)\s+years?\s+ago|a\s+few\s+years?\s+ago)\b",
+                normalized_text,
+            )
+        )
+    duration_match = re.fullmatch(
+        r"(\d+|a|an|one|two|three|four|five|six|seven|eight|nine|ten)\s+(days?|weeks?|months?|years?)\s+ago",
+        normalized_expression,
+    )
+    if duration_match:
+        count_text = duration_match.group(1)
+        unit = duration_match.group(2)
+        unit_base = re.sub(r"s$", "", unit)
+        count_value = int(count_text) if count_text.isdigit() else _TEMPORAL_COUNT_WORDS.get(count_text)
+        if count_value is None:
+            return False
+        count_variants = {str(count_value)}
+        count_variants.update(word for word, value in _TEMPORAL_COUNT_WORDS.items() if value == count_value)
+        count_pattern = "|".join(re.escape(item) for item in sorted(count_variants, key=len, reverse=True))
+        return bool(
+            re.search(
+                rf"\b(?:{count_pattern})\s+{unit_base}s?\s+(?:ago|before|prior\s+to)\b",
+                normalized_text,
+            )
+        )
+    return False
+
+
 def audit_claim_preservation(
     *,
     candidates: Iterable[MustPreserveCandidate],
@@ -923,6 +1024,7 @@ def audit_claim_preservation(
         for row in signal_rows:
             claim = row["claim"]
             claim_sources = set(row["source_message_ids"])  # type: ignore[arg-type]
+            claim_text = str(row["text"])
             claim_text_match = _surface_matches(candidate.surface, str(row["text"]))
             exact_match = any(_surface_matches(candidate.surface, term) for term in list(row["exact_terms"]))
             facet_match = False
@@ -939,6 +1041,20 @@ def audit_claim_preservation(
                 elif candidate.relation and normalize_facet_value(value) == normalize_facet_value(candidate.surface):
                     facet_match = True
             if claim_text_match or exact_match or facet_match:
+                if candidate.temporal_expression and not _temporal_expression_matches(
+                    candidate.temporal_expression,
+                    claim_text,
+                ):
+                    diagnostics.append(
+                        {
+                            "candidate": candidate.to_metadata(),
+                            "claim_id": getattr(claim, "claim_id", None),
+                            "covered_by": "surface_without_temporal_expression",
+                            "coverage_rejected_reason": "temporal_expression_missing",
+                            "claim_source_message_ids": sorted(claim_sources),
+                        }
+                    )
+                    continue
                 covered = True
                 covering_sources.update(claim_sources)
                 diagnostics.append(

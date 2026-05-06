@@ -89,7 +89,7 @@ from trajpatch.providers.structured_outputs import (
     validate_trajectory_match_result,
 )
 from trajpatch.storage.models import ClaimOpRecord, ClaimRecord, EpisodicMemorySnapshot
-from trajpatch.storage.repository import TrajPatchStore
+from trajpatch.storage.repository import TrajWikiStore
 from trajpatch.types import NormalizedMessage
 from trajpatch.utils.json_utils import write_json
 from trajpatch.utils.text import collapse_whitespace, extract_keywords, keyword_overlap_score
@@ -322,7 +322,7 @@ class MemoryOrchestrator:
     def __init__(
         self,
         config: RunConfig,
-        store: TrajPatchStore,
+        store: TrajWikiStore,
         llm_provider: LLMProvider,
         embedding_provider: EmbeddingProvider,
         *,
@@ -585,8 +585,13 @@ class MemoryOrchestrator:
         )
         subject = speaker or "The exchange"
         category = str(candidate.category or "").strip().casefold()
+        temporal_expression = collapse_whitespace(candidate.temporal_expression or "")
+        temporal_suffix = f" {temporal_expression}" if temporal_expression else ""
         if category == "activity":
-            return f"{subject} mentioned {surface} as an activity."
+            action = collapse_whitespace(candidate.event_action or "")
+            if action:
+                return f"{subject} {action} {surface}{temporal_suffix}."
+            return f"{subject} mentioned {surface} as an activity{temporal_suffix}."
         if category == "book_title":
             return f"{subject} mentioned {surface} as a book title."
         if category == "recipe":
@@ -598,14 +603,16 @@ class MemoryOrchestrator:
         if category == "place":
             return f"{subject} mentioned {surface} as a place."
         if category == "painted_object":
-            return f"{subject} mentioned {surface} as something painted."
+            return f"{subject} mentioned {surface} as something painted{temporal_suffix}."
         if category == "event_type":
-            return f"{subject} mentioned {surface} as an event."
+            return f"{subject} mentioned {surface} as an event{temporal_suffix}."
+        if category == "event_object":
+            return f"{subject} mentioned {surface} as an event object{temporal_suffix}."
         if category == "count":
             return f"{subject} mentioned the count {surface}."
         if candidate.relation == "research_topic":
             return f"{subject} mentioned {surface} as a research topic."
-        return f"{subject} mentioned {surface}."
+        return f"{subject} mentioned {surface}{temporal_suffix}."
 
     def _apply_preservation_candidate_fallback(
         self,
@@ -2009,6 +2016,16 @@ class MemoryOrchestrator:
                         if str(value).strip()
                     ],
                     rule=(str(payload.get("rule")).strip() if payload.get("rule") else None),
+                    raw_surface=(
+                        str(payload.get("raw_surface")).strip() if payload.get("raw_surface") else None
+                    ),
+                    canonical=(str(payload.get("canonical")).strip() if payload.get("canonical") else None),
+                    event_action=(str(payload.get("action")).strip() if payload.get("action") else None),
+                    temporal_expression=(
+                        str(payload.get("temporal_expression")).strip()
+                        if payload.get("temporal_expression")
+                        else None
+                    ),
                 )
             )
         return candidates
@@ -2023,9 +2040,19 @@ class MemoryOrchestrator:
         candidate_lines = []
         for index, candidate in enumerate(missing_candidates, start=1):
             relation = f" | relation={candidate.relation}" if candidate.relation else ""
+            extras: list[str] = []
+            if candidate.temporal_expression:
+                extras.append(f"temporal_expression={candidate.temporal_expression}")
+            if candidate.raw_surface:
+                extras.append(f"raw_surface={candidate.raw_surface}")
+            if candidate.source_refs:
+                extras.append(f"source_refs={', '.join(candidate.source_refs)}")
+            if candidate.rule:
+                extras.append(f"rule={candidate.rule}")
+            extra_text = f" | {' | '.join(extras)}" if extras else ""
             candidate_lines.append(
                 f"- C{index}: surface={candidate.surface} | category={candidate.category}{relation} "
-                f"| source_message_ids={', '.join(candidate.source_message_ids)}"
+                f"| source_message_ids={', '.join(candidate.source_message_ids)}{extra_text}"
             )
         current_dsl = parsed.raw.raw_text or render_episodic_memory(parsed.raw)
         return (

@@ -86,6 +86,7 @@ class AnswerGenerator:
                 "multi_entity": bool(stored.get("multi_entity")),
                 "comparison_like": bool(stored.get("comparison_like")),
                 "count_like": bool(stored.get("count_like")),
+                "duration_count_like": bool(stored.get("duration_count_like") or "duration_count" in list(stored.get("tags") or [])),
                 "item_family": stored.get("item_family"),
                 "tags": list(stored.get("tags") or []),
             }
@@ -95,6 +96,7 @@ class AnswerGenerator:
             "multi_entity": bool(derived.get("multi_entity")),
             "comparison_like": bool(derived.get("comparison_like")),
             "count_like": bool(derived.get("count_like")),
+            "duration_count_like": bool(derived.get("duration_count_like") or "duration_count" in list(derived.get("tags") or [])),
             "item_family": derived.get("item_family"),
             "tags": list(derived.get("tags") or []),
         }
@@ -193,6 +195,46 @@ class AnswerGenerator:
             )
         )
 
+    @staticmethod
+    def _question_is_duration_count(question: str | None, query_shape: dict[str, object] | None = None) -> bool:
+        if bool((query_shape or {}).get("duration_count_like")):
+            return True
+        text = " ".join(str(question or "").casefold().split())
+        return bool(
+            re.search(
+                r"\bhow\s+many\s+(?:seconds?|minutes?|hours?|days?|weeks?|months?|years?)\b"
+                r".*\b(?:passed|pass|took|take|since|between|after|before|until|from)\b",
+                text,
+            )
+        )
+
+    @staticmethod
+    def _inventory_count_family(question: str | None) -> str | None:
+        text = " ".join(str(question or "").casefold().split())
+        match = re.search(
+            r"\bhow\s+many\s+([a-z][a-z' -]*?)\b"
+            r"(?:did|does|do|has|have|had|will|would|were|are|as|,|\?|$)",
+            text,
+        )
+        noun_phrase = match.group(1).strip() if match else ""
+        family_patterns: tuple[tuple[str, tuple[str, ...]], ...] = (
+            ("pet", ("pet", "pets", "dog", "dogs", "cat", "cats", "turtle", "turtles", "snake", "snakes")),
+            ("book", ("book", "books")),
+            ("class", ("class", "classes", "course", "courses", "lesson", "lessons")),
+            ("event", ("event", "events", "concert", "concerts", "conference", "conferences", "workshop", "workshops")),
+            ("activity", ("activity", "activities", "hobby", "hobbies")),
+            ("place", ("place", "places", "city", "cities", "country", "countries", "location", "locations")),
+            ("organization", ("organization", "organizations", "group", "groups")),
+            ("deal", ("deal", "deals")),
+            ("item", ("item", "items", "thing", "things")),
+            ("instrument", ("instrument", "instruments")),
+            ("game", ("game", "games")),
+        )
+        for family, terms in family_patterns:
+            if any(re.search(rf"\b{re.escape(term)}\b", noun_phrase) for term in terms):
+                return family
+        return None
+
     @classmethod
     def _expected_answer_type(cls, question: str | None, query_shape: dict[str, object]) -> str:
         text = " ".join(str(question or "").casefold().split())
@@ -227,16 +269,29 @@ class AnswerGenerator:
         weekday = r"(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)"
         if re.search(rf"\b\d{{1,2}}\s+{month}\b|\b{month}\s+\d{{1,2}}\b", normalized):
             return True
+        if re.search(rf"\b{month}\s+\d{{4}}\b", normalized):
+            return True
         if re.search(r"\b\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?\b", normalized):
             return True
         if re.search(rf"\b{weekday}\b", normalized):
             return True
-        if re.search(r"\b(?:today|yesterday|tomorrow|last week|last month|last year|next week|next month)\b", normalized):
+        if re.search(
+            r"\b(?:today|yesterday|tomorrow|last week|last month|last year|next week|next month|"
+            r"week before|weeks before|friday before|saturday before|sunday before|monday before|"
+            r"tuesday before|wednesday before|thursday before|a few years ago)\b",
+            normalized,
+        ):
+            return True
+        if re.search(
+            r"\b(?:a|an|one|two|three|four|five|six|seven|eight|nine|ten|\d+)\s+"
+            r"(?:days?|weeks?|months?|years?)\s+ago\b",
+            normalized,
+        ):
             return True
         if re.search(r"\b(?:morning|afternoon|evening|night|am|pm)\b", normalized):
             return True
         if re.search(r"\b\d{4}\b", normalized):
-            return allow_year_only or bool(re.search(rf"\b{month}\b|\b\d{{1,2}}\b", normalized))
+            return True
         return False
 
     @classmethod
@@ -246,10 +301,12 @@ class AnswerGenerator:
             return False
         lowered = answer.casefold().strip(" .")
         if re.fullmatch(
-            r"(?:one|two|three|four|five|six|seven|eight|nine|ten|\d+)\s+"
+            r"(?:a|an|one|two|three|four|five|six|seven|eight|nine|ten|\d+)\s+"
             r"(?:years?|months?|weeks?|days?|hours?|minutes?)\s+ago",
             lowered,
         ):
+            return True
+        if re.fullmatch(r"(?:about|around)\s+(?:one|two|three|four|five|six|seven|eight|nine|ten|\d+)\s+years?\s+ago|a\s+few\s+years?\s+ago", lowered):
             return True
         if re.fullmatch(
             r"(?:today|yesterday|tomorrow|last\s+(?:week|month|year)|next\s+(?:week|month|year)|"
@@ -354,6 +411,20 @@ class AnswerGenerator:
         "december": 12,
         "dec": 12,
     }
+    NUMBER_WORDS = {
+        "a": 1,
+        "an": 1,
+        "one": 1,
+        "two": 2,
+        "three": 3,
+        "four": 4,
+        "five": 5,
+        "six": 6,
+        "seven": 7,
+        "eight": 8,
+        "nine": 9,
+        "ten": 10,
+    }
 
     @classmethod
     def _parse_date_mention(cls, text: str) -> date | None:
@@ -394,6 +465,27 @@ class AnswerGenerator:
         return f"{value.day} {value.strftime('%B')} {value.year}"
 
     @classmethod
+    def _parse_month_year_mention(cls, text: str) -> tuple[int, int] | None:
+        compact = " ".join(str(text or "").casefold().replace(",", " ").split())
+        match = re.search(
+            r"\b"
+            r"(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|"
+            r"aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)"
+            r"\s+(\d{4})\b",
+            compact,
+        )
+        if not match:
+            return None
+        month = cls.MONTHS.get(match.group(1))
+        if not month:
+            return None
+        return int(match.group(2)), month
+
+    @staticmethod
+    def _format_month_year(year: int, month: int) -> str:
+        return f"{date(year, month, 1).strftime('%B')} {year}"
+
+    @classmethod
     def _date_mentions(cls, text: str) -> set[str]:
         mentions: set[str] = set()
         compact = " ".join(str(text or "").replace(",", " ").split())
@@ -414,6 +506,115 @@ class AnswerGenerator:
     @classmethod
     def _temporal_anchor_resolutions(cls, retrieval_bundle: RetrievalBundle) -> dict[str, list[dict[str, Any]]]:
         resolutions: dict[str, list[dict[str, Any]]] = {}
+        seen: set[tuple[str, str, str, str, str, str]] = set()
+
+        def infer_resolution_fields(
+            *,
+            relative_term: str,
+            resolved_answer_text: str | None,
+            resolved_date: str | None,
+            resolution_kind: str | None,
+            resolution_granularity: str | None,
+        ) -> tuple[str, str, str | None, str | None]:
+            target = " ".join(str(resolved_answer_text or resolved_date or "").strip().split())
+            target = re.sub(r"^approximately\s+", "", target, flags=re.IGNORECASE)
+            normalized_kind = str(resolution_kind or "").strip()
+            normalized_granularity = str(resolution_granularity or "").strip()
+            normalized_resolved_date = str(resolved_date or "").strip() or None
+            parsed_date = cls._parse_date_mention(target)
+            if not normalized_kind:
+                if re.search(r"\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\s+before\b", target, re.IGNORECASE):
+                    normalized_kind = "relative_span"
+                elif re.search(r"\bweek\s+before\b|\bweeks?\s+before\b", target, re.IGNORECASE):
+                    normalized_kind = "relative_span"
+                elif parsed_date:
+                    normalized_kind = "exact_date"
+                elif cls._parse_month_year_mention(target):
+                    normalized_kind = "month_year"
+                elif re.fullmatch(r"\d{4}", target):
+                    normalized_kind = "year"
+                elif re.search(r"\bfew\b|\babout\b|\baround\b", target, re.IGNORECASE):
+                    normalized_kind = "fuzzy_relative"
+                else:
+                    normalized_kind = "relative_span"
+            if not normalized_granularity:
+                if normalized_kind == "exact_date":
+                    normalized_granularity = "day"
+                elif re.search(r"\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\s+before\b", target, re.IGNORECASE):
+                    normalized_granularity = "weekday_span"
+                elif normalized_kind == "relative_span":
+                    normalized_granularity = "week_span"
+                elif normalized_kind == "month_year":
+                    normalized_granularity = "month"
+                elif normalized_kind == "year":
+                    normalized_granularity = "year"
+                elif normalized_kind == "fuzzy_relative":
+                    normalized_granularity = "fuzzy"
+            if normalized_kind == "exact_date" and parsed_date:
+                normalized_resolved_date = cls._format_date_value(parsed_date)
+                target = normalized_resolved_date
+            return normalized_kind or "exact_date", normalized_granularity or "day", normalized_resolved_date, target
+
+        def add_resolution(
+            *,
+            ref: str,
+            relative_term: str,
+            source_date: str | None,
+            resolution_kind: str,
+            resolution_granularity: str | None = None,
+            resolved_date: str | None = None,
+            resolved_answer_text: str | None = None,
+        ) -> None:
+            normalized_ref = str(ref or "").strip()
+            normalized_term = " ".join(str(relative_term or "").strip().casefold().split())
+            normalized_source_date = str(source_date or "").strip() or None
+            normalized_kind, normalized_granularity, normalized_resolved_date, normalized_answer_text = (
+                infer_resolution_fields(
+                    relative_term=normalized_term,
+                    resolved_answer_text=resolved_answer_text,
+                    resolved_date=resolved_date,
+                    resolution_kind=resolution_kind,
+                    resolution_granularity=resolution_granularity,
+                )
+            )
+            if not normalized_ref or not normalized_term or not normalized_answer_text:
+                return
+            key = (
+                normalized_ref,
+                normalized_term,
+                normalized_kind,
+                normalized_granularity,
+                str(normalized_resolved_date or ""),
+                normalized_answer_text.casefold(),
+            )
+            if key in seen:
+                return
+            seen.add(key)
+            row: dict[str, Any] = {
+                "relative_term": normalized_term,
+                "source_date": normalized_source_date,
+                "resolution_kind": normalized_kind,
+                "resolution_granularity": normalized_granularity,
+                "resolved_answer_text": normalized_answer_text,
+            }
+            if normalized_resolved_date:
+                row["resolved_date"] = normalized_resolved_date
+            resolutions.setdefault(normalized_ref, []).append(row)
+
+        for row in list((retrieval_bundle.metadata or {}).get("temporal_anchor_resolutions") or []):
+            if not isinstance(row, dict):
+                continue
+            add_resolution(
+                ref=str(row.get("source_ref") or ""),
+                relative_term=str(row.get("relative_term") or ""),
+                source_date=str(row.get("source_date") or "") or None,
+                resolution_kind=str(row.get("resolution_kind") or "") or (
+                    "exact_date" if row.get("resolved_date") else "relative_span"
+                ),
+                resolution_granularity=str(row.get("resolution_granularity") or "") or None,
+                resolved_date=str(row.get("resolved_date") or "") or None,
+                resolved_answer_text=str(row.get("resolved_answer_text") or "") or None,
+            )
         for line in str(retrieval_bundle.prompt_context or "").splitlines():
             ref_match = re.search(r"\b(D\d+:\d+)\b", line)
             if not ref_match:
@@ -421,32 +622,94 @@ class AnswerGenerator:
             ref = ref_match.group(1)
             source_date_match = re.search(r"occurred at\s+([^;.\n]+)", line, flags=re.IGNORECASE)
             source_date = cls._parse_date_mention(source_date_match.group(1)) if source_date_match else None
-            for relative, delta in (("yesterday", -1), ("today", 0), ("tomorrow", 1)):
-                if re.search(rf"[\"']?{relative}[\"']?\s+refers to\s+([^;.\n]+)", line, flags=re.IGNORECASE):
-                    resolved_match = re.search(
-                        rf"[\"']?{relative}[\"']?\s+refers to\s+([^;.\n]+)",
-                        line,
-                        flags=re.IGNORECASE,
-                    )
-                    resolved = cls._parse_date_mention(resolved_match.group(1)) if resolved_match else None
+            source_date_text = cls._format_date_value(source_date) if source_date else None
+            generic_resolution_match = re.search(
+                r"[\"']([^\"']+)[\"']\s+refers\s+to\s+([^;.\n]+)",
+                line,
+                flags=re.IGNORECASE,
+            )
+            if generic_resolution_match:
+                relative_term = generic_resolution_match.group(1).casefold()
+                resolved_text = " ".join(generic_resolution_match.group(2).strip().split())
+                resolved_text = re.sub(r"^approximately\s+", "", resolved_text, flags=re.IGNORECASE)
+                add_resolution(
+                    ref=ref,
+                    relative_term=relative_term,
+                    source_date=source_date_text,
+                    resolution_kind="",
+                    resolved_answer_text=resolved_text,
+                )
+                continue
+            if source_date and re.search(r"\blast\s+week\b", line, flags=re.IGNORECASE):
+                add_resolution(
+                    ref=ref,
+                    relative_term="last week",
+                    source_date=source_date_text,
+                    resolution_kind="relative_span",
+                    resolution_granularity="week_span",
+                    resolved_answer_text=f"the week before {cls._format_date_value(source_date)}",
+                )
+            exact_patterns: list[tuple[str, int | None]] = [
+                ("yesterday", -1),
+                ("today", 0),
+                ("tomorrow", 1),
+            ]
+            for days_ago_match in re.finditer(r"\b(\d{1,2})\s+days?\s+ago\b", line, flags=re.IGNORECASE):
+                exact_patterns.append((days_ago_match.group(0).casefold(), -int(days_ago_match.group(1))))
+            for relative, delta in exact_patterns:
+                resolved_match = re.search(
+                    rf"[\"']?{re.escape(relative)}[\"']?\s+refers to\s+([^;.\n]+)",
+                    line,
+                    flags=re.IGNORECASE,
+                )
+                if resolved_match:
+                    resolved = cls._parse_date_mention(resolved_match.group(1))
                     if resolved:
-                        resolutions.setdefault(ref, []).append(
-                            {
-                                "relative_term": relative,
-                                "source_date": cls._format_date_value(source_date) if source_date else None,
-                                "resolved_date": cls._format_date_value(resolved),
-                            }
+                        resolved_text = cls._format_date_value(resolved)
+                        add_resolution(
+                            ref=ref,
+                            relative_term=relative,
+                            source_date=source_date_text,
+                            resolution_kind="exact_date",
+                            resolved_date=resolved_text,
+                            resolved_answer_text=resolved_text,
                         )
-                elif source_date and re.search(rf"\b{relative}\b", line, flags=re.IGNORECASE):
+                elif source_date and delta is not None and re.search(rf"\b{re.escape(relative)}\b", line, flags=re.IGNORECASE):
                     resolved = source_date + timedelta(days=delta)
-                    resolutions.setdefault(ref, []).append(
-                        {
-                            "relative_term": relative,
-                            "source_date": cls._format_date_value(source_date),
-                            "resolved_date": cls._format_date_value(resolved),
-                        }
+                    resolved_text = cls._format_date_value(resolved)
+                    add_resolution(
+                        ref=ref,
+                        relative_term=relative,
+                        source_date=source_date_text,
+                        resolution_kind="exact_date",
+                        resolved_date=resolved_text,
+                        resolved_answer_text=resolved_text,
                     )
         return resolutions
+
+    @classmethod
+    def _temporal_answer_text_matches_target(cls, answer_text: str, target_text: str | None) -> bool:
+        target = cls._temporal_normalized_text(target_text)
+        answer = cls._temporal_normalized_text(answer_text)
+        if not target or not answer:
+            return False
+        variants = {target}
+        if target.startswith("the "):
+            variants.add(target[4:])
+        week_before_match = re.match(r"^(?:the\s+)?week\s+before\s+(.+)$", target)
+        if week_before_match:
+            date_text = week_before_match.group(1)
+            variants.update(
+                {
+                    f"week before {date_text}",
+                    f"the week before {date_text}",
+                    f"week prior to {date_text}",
+                    f"the week prior to {date_text}",
+                    f"previous week before {date_text}",
+                    f"the previous week before {date_text}",
+                }
+            )
+        return any(f" {variant} " in f" {answer} " for variant in variants if variant)
 
     @classmethod
     def _source_line_date(cls, source_text: str) -> str | None:
@@ -727,6 +990,17 @@ class AnswerGenerator:
                 relative_terms = [
                     str(resolution.get("relative_term") or "").strip()
                 ]
+                resolved_date = str(resolution.get("resolved_date") or "").strip() or None
+                resolved_answer_text = (
+                    " ".join(str(resolution.get("resolved_answer_text") or resolved_date or "").strip().split())
+                    or None
+                )
+                resolution_kind = str(resolution.get("resolution_kind") or "").strip() or (
+                    "exact_date" if resolved_date else "relative_span"
+                )
+                resolution_granularity = str(resolution.get("resolution_granularity") or "").strip() or (
+                    "day" if resolution_kind == "exact_date" else None
+                )
                 score = cls._score_temporal_candidate(
                     source_text=source_text,
                     question_profile=question_profile,
@@ -736,7 +1010,11 @@ class AnswerGenerator:
                     {
                         "source_ref": ref,
                         "source_date": resolution.get("source_date") or source_date,
-                        "resolved_date": resolution.get("resolved_date"),
+                        "resolved_date": resolved_date,
+                        "resolved_answer_text": resolved_answer_text,
+                        "answer_target": resolved_answer_text or resolved_date,
+                        "resolution_kind": resolution_kind,
+                        "resolution_granularity": resolution_granularity,
                         "relative_terms": [term for term in relative_terms if term],
                         **score,
                     }
@@ -753,6 +1031,10 @@ class AnswerGenerator:
                             "source_ref": ref,
                             "source_date": source_date,
                             "resolved_date": source_date,
+                            "resolved_answer_text": source_date,
+                            "answer_target": source_date,
+                            "resolution_kind": "exact_date",
+                            "resolution_granularity": "day",
                             "relative_terms": [],
                             **score,
                         }
@@ -772,7 +1054,7 @@ class AnswerGenerator:
             row
             for row in candidates
             if row.get("confidence") in {"high", "medium"}
-            and row.get("resolved_date")
+            and row.get("answer_target")
             and bool(row.get("query_relevant"))
         ]
         answer_dates = cls._date_mentions(answer_text)
@@ -791,14 +1073,26 @@ class AnswerGenerator:
         accepted_dates = {
             str(row.get("resolved_date") or "").casefold()
             for row in accepted_candidates
-            if row.get("resolved_date")
+            if row.get("resolution_kind") == "exact_date" and row.get("resolved_date")
         }
+        accepted_answer_targets = [
+            str(row.get("resolved_answer_text") or "").strip()
+            for row in accepted_candidates
+            if row.get("resolution_kind") != "exact_date" and row.get("resolved_answer_text")
+        ]
         valid = None
         rejection_reason = None
-        if accepted_dates:
-            valid = bool(answer_dates & accepted_dates)
+        if accepted_dates or accepted_answer_targets:
+            valid = bool(answer_dates & accepted_dates) or any(
+                cls._temporal_answer_text_matches_target(answer_text, target)
+                for target in accepted_answer_targets
+            )
             if not valid:
-                rejection_reason = "answer_date_not_aligned_to_query_relevant_temporal_source"
+                rejection_reason = (
+                    "answer_temporal_target_not_aligned_to_query_relevant_temporal_source"
+                    if accepted_answer_targets
+                    else "answer_date_not_aligned_to_query_relevant_temporal_source"
+                )
         elif not candidates:
             valid = None
         elif answer_dates:
@@ -812,6 +1106,14 @@ class AnswerGenerator:
             "answer_temporal_candidate_dates": candidates[:20],
             "answer_temporal_selected_source_ref": selected.get("source_ref") if selected else None,
             "answer_temporal_selected_date": selected.get("resolved_date") if selected else None,
+            "answer_temporal_selected_answer_text": selected.get("answer_target") if selected else None,
+            "answer_temporal_selected_resolution_kind": selected.get("resolution_kind") if selected else None,
+            "answer_temporal_selected_resolution_granularity": (
+                selected.get("resolution_granularity") if selected else None
+            ),
+            "answer_temporal_selected_relative_term": (
+                list(selected.get("relative_terms") or [None])[0] if selected else None
+            ),
             "answer_temporal_selected_confidence": selected.get("confidence") if selected else None,
             "answer_temporal_candidate_score": int(selected.get("temporal_score") or 0) if selected else None,
             "answer_temporal_candidate_match_terms": list(selected.get("matched_terms") or []) if selected else [],
@@ -3200,9 +3502,13 @@ class AnswerGenerator:
             payload.get("can_answer")
             and temporal_metadata.get("answer_temporal_alignment_valid") is False
         ):
-            selected_date = str(temporal_metadata.get("answer_temporal_selected_date") or "").strip()
-            if selected_date:
-                answer_text = selected_date
+            selected_answer_text = str(
+                temporal_metadata.get("answer_temporal_selected_answer_text")
+                or temporal_metadata.get("answer_temporal_selected_date")
+                or ""
+            ).strip()
+            if selected_answer_text:
+                answer_text = selected_answer_text
                 temporal_metadata.update(
                     {
                         "answer_temporal_repair_used": True,
@@ -3466,6 +3772,18 @@ class AnswerGenerator:
             ),
             "answer_temporal_selected_source_ref": temporal_metadata.get("answer_temporal_selected_source_ref"),
             "answer_temporal_selected_date": temporal_metadata.get("answer_temporal_selected_date"),
+            "answer_temporal_selected_answer_text": temporal_metadata.get(
+                "answer_temporal_selected_answer_text"
+            ),
+            "answer_temporal_selected_resolution_kind": temporal_metadata.get(
+                "answer_temporal_selected_resolution_kind"
+            ),
+            "answer_temporal_selected_resolution_granularity": temporal_metadata.get(
+                "answer_temporal_selected_resolution_granularity"
+            ),
+            "answer_temporal_selected_relative_term": temporal_metadata.get(
+                "answer_temporal_selected_relative_term"
+            ),
             "answer_temporal_selected_confidence": temporal_metadata.get("answer_temporal_selected_confidence"),
             "answer_temporal_candidate_score": temporal_metadata.get("answer_temporal_candidate_score"),
             "answer_temporal_candidate_match_terms": list(
@@ -4171,6 +4489,9 @@ class AnswerGenerator:
     def _list_scope_profile(cls, question: str | None, query_shape: dict[str, object]) -> dict[str, Any]:
         text = " ".join(str(question or "").casefold().split())
         item_family = str(query_shape.get("item_family") or "").casefold()
+        inventory_count_family = cls._inventory_count_family(question)
+        if bool(query_shape.get("count_like")) and inventory_count_family:
+            item_family = inventory_count_family
         kind = item_family or "generic_list"
         if item_family in {"book", "reading"} or re.search(r"\bbooks?\b|\bread\b|\breading\b", text):
             kind = "book"
@@ -4345,6 +4666,15 @@ class AnswerGenerator:
             "dream": {"dream", "goal", "hope"},
             "class": {"class", "course", "lesson", "workshop"},
         }
+        if kind == "pet":
+            item_match = cls._text_has_any(normalized, family_terms[kind]) or bool(
+                re.search(r"\b(?:names?\s+are|named|called)\b", item_text.casefold())
+            )
+            return {
+                "required": item_match,
+                "optional": not item_match,
+                "reason": "pet_scope_match" if item_match else "pet_scope_missing_family_signal",
+            }
         if kind in family_terms:
             matched = cls._text_has_any(combined, family_terms[kind])
             return {
@@ -4567,6 +4897,7 @@ class AnswerGenerator:
         query_shape = cls._locomo_query_shape(query_task, retrieval_bundle)
         expected_type = cls._expected_answer_type(query_task.question, query_shape)
         item_family = str(query_shape.get("item_family") or "").casefold()
+        inventory_count_family = cls._inventory_count_family(query_task.question)
         list_family = item_family in {
             "book",
             "reading",
@@ -4583,26 +4914,36 @@ class AnswerGenerator:
             "class",
             "item",
         }
+        if expected_type in {"value", "date", "boolean"}:
+            reason = "date_time_question" if expected_type == "date" else f"{expected_type}_question"
+            return {
+                "allowed": False,
+                "reason": reason,
+                "expected_answer_type": expected_type,
+                "query_shape": query_shape,
+            }
+        if expected_type == "count":
+            if cls._question_is_duration_count(query_task.question, query_shape):
+                return {
+                    "allowed": False,
+                    "reason": "duration_count_question",
+                    "expected_answer_type": expected_type,
+                    "query_shape": query_shape,
+                }
+            if not (inventory_count_family or list_family or query_shape.get("list_like") or query_shape.get("multi_entity") or query_shape.get("comparison_like")):
+                return {
+                    "allowed": False,
+                    "reason": "count_question",
+                    "expected_answer_type": expected_type,
+                    "query_shape": query_shape,
+                }
         explicit_list = bool(
             query_shape.get("list_like")
             or query_shape.get("multi_entity")
             or query_shape.get("comparison_like")
             or list_family
+            or inventory_count_family
         )
-        if expected_type == "date":
-            return {
-                "allowed": False,
-                "reason": "date_time_question",
-                "expected_answer_type": expected_type,
-                "query_shape": query_shape,
-            }
-        if expected_type in {"count", "boolean"} and not explicit_list:
-            return {
-                "allowed": False,
-                "reason": f"{expected_type}_question",
-                "expected_answer_type": expected_type,
-                "query_shape": query_shape,
-            }
         if not explicit_list:
             return {
                 "allowed": False,
@@ -4627,6 +4968,7 @@ class AnswerGenerator:
         list_gate = cls._postcheck_allows_list_coverage(query_task, retrieval_bundle)
         query_shape = dict(list_gate.get("query_shape") or cls._locomo_query_shape(query_task, retrieval_bundle))
         item_family = str(query_shape.get("item_family") or "").casefold()
+        inventory_count_family = cls._inventory_count_family(query_task.question)
         list_family = item_family in {
             "book",
             "reading",
@@ -4644,7 +4986,11 @@ class AnswerGenerator:
             "item",
         }
         if not list_gate.get("allowed") or not (
-            query_shape.get("list_like") or query_shape.get("multi_entity") or query_shape.get("comparison_like") or list_family
+            query_shape.get("list_like")
+            or query_shape.get("multi_entity")
+            or query_shape.get("comparison_like")
+            or list_family
+            or inventory_count_family
         ):
             return {
                 "scope_kind": str(list_gate.get("reason") or "not_list_like"),
@@ -4653,10 +4999,22 @@ class AnswerGenerator:
                 "rejected_rows": [],
                 "coverage_skipped": True,
                 "coverage_skip_reason": str(list_gate.get("reason") or "not_list_like"),
-                "coverage_blocked_by_expected_type": list_gate.get("reason") in {"date_time_question", "count_question", "boolean_question"},
+                "coverage_blocked_by_expected_type": list_gate.get("reason")
+                in {"date_time_question", "count_question", "duration_count_question", "value_question", "boolean_question"},
                 "expected_answer_type": list_gate.get("expected_answer_type"),
             }
         scope_profile = cls._list_scope_profile(query_task.question, query_shape)
+        if scope_profile.get("kind") in {"generic_list", "type"}:
+            return {
+                "scope_kind": str(scope_profile.get("kind") or "generic_list"),
+                "required_rows": [],
+                "optional_rows": [],
+                "rejected_rows": [],
+                "coverage_skipped": True,
+                "coverage_skip_reason": f"{scope_profile.get('kind')}_scope",
+                "coverage_blocked_by_expected_type": False,
+                "expected_answer_type": list_gate.get("expected_answer_type"),
+            }
         support = cls._grounded_surface_support(retrieval_bundle)
         candidate_values = list(
             dict.fromkeys(
@@ -5085,6 +5443,7 @@ class AnswerGenerator:
         retrieval_bundle: RetrievalBundle,
         initial_answer_text: str,
         repaired_answer_text: str,
+        issue: str,
         synthesis_payload: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         initial_coverage = cls._locomo_list_coverage_diagnostics(
@@ -5104,25 +5463,56 @@ class AnswerGenerator:
             repaired_answer_text,
             synthesis_payload,
         )
+        initial_missing = list(initial_coverage.get("answer_missing_supported_list_items") or [])
+        repaired_missing = list(repaired_coverage.get("answer_missing_supported_list_items") or [])
         initial_scope_extras = list(initial_coverage.get("answer_scope_mismatched_extra_items") or [])
         remaining_scope_extras = list(repaired_coverage.get("answer_scope_mismatched_extra_items") or [])
         removed_scope_extras = [
             item for item in initial_scope_extras
             if item not in remaining_scope_extras
         ]
+        list_coverage_improved = bool(initial_missing and len(repaired_missing) < len(initial_missing))
+        repaired_supported_items = list(repaired_coverage.get("answer_supported_required_items") or [])
+        if issue == "abstain_despite_supported_list_items" and repaired_supported_items:
+            list_coverage_improved = True
+        expected_type = cls._expected_answer_type(
+            query_task.question,
+            cls._locomo_query_shape(query_task, retrieval_bundle),
+        )
+        initial_valid = cls._answer_text_matches_expected_type(initial_answer_text, expected_type, query_task.question)
+        single_value_changed_by_list_repair = bool(
+            issue == "missing_supported_list_items"
+            and expected_type in {"value", "place", "person"}
+            and initial_valid
+            and cls._normalized_surface_text(initial_answer_text) != cls._normalized_surface_text(repaired_answer_text)
+        )
+        not_improved = bool(
+            issue == "missing_supported_list_items"
+            and initial_missing
+            and not list_coverage_improved
+        )
+        validation_failed = bool(dropped_items or not_improved or single_value_changed_by_list_repair)
+        if dropped_items:
+            validation_reason = "dropped_supported_required_items"
+        elif single_value_changed_by_list_repair:
+            validation_reason = "single_value_changed_by_list_repair"
+        elif not_improved:
+            validation_reason = "list_coverage_not_improved"
+        else:
+            validation_reason = None
         return {
             "answer_supported_required_items": required_items,
             "answer_supported_required_item_refs": dict(
                 initial_coverage.get("answer_supported_required_item_refs") or {}
             ),
             "answer_repair_dropped_supported_items": dropped_items,
-            "answer_repair_missing_required_items_after_repair": list(
-                repaired_coverage.get("answer_missing_supported_list_items") or []
-            ),
+            "answer_repair_missing_required_items_after_repair": repaired_missing,
             "answer_repair_removed_scope_mismatched_items": removed_scope_extras,
-            "answer_repair_post_validation_failed": bool(dropped_items),
-            "answer_repair_post_validation_action": "preserve_initial_answer" if dropped_items else "accept_repair",
-            "answer_repair_preserved_initial_answer": bool(dropped_items),
+            "answer_repair_list_coverage_improved": list_coverage_improved,
+            "answer_repair_post_validation_failed": validation_failed,
+            "answer_repair_post_validation_reason": validation_reason,
+            "answer_repair_post_validation_action": "preserve_initial_answer" if validation_failed else "accept_repair",
+            "answer_repair_preserved_initial_answer": validation_failed,
         }
 
     @classmethod
@@ -5423,6 +5813,9 @@ class AnswerGenerator:
                 + f"ref={ref}; "
                 + f"source_date={row.get('source_date') or '-'}; "
                 + f"resolved_date={row.get('resolved_date') or '-'}; "
+                + f"resolved_answer_text={row.get('resolved_answer_text') or row.get('answer_target') or '-'}; "
+                + f"resolution_kind={row.get('resolution_kind') or '-'}; "
+                + f"resolution_granularity={row.get('resolution_granularity') or '-'}; "
                 + f"confidence={row.get('confidence') or '-'}; "
                 + f"score={row.get('temporal_score') or 0}; "
                 + f"matched={', '.join(list(row.get('matched_terms') or [])) or '-'}; "
@@ -5823,6 +6216,7 @@ class AnswerGenerator:
                                 retrieval_bundle=retrieval_bundle,
                                 initial_answer_text=initial_response.text,
                                 repaired_answer_text=normalized_text,
+                                issue=issue,
                                 synthesis_payload=synthesis_payload,
                             )
                             repair_normalization_metadata.update(repair_validation_metadata)
@@ -5830,7 +6224,7 @@ class AnswerGenerator:
                                 repair_normalization_metadata["answer_repair_discarded"] = True
                                 repair_normalization_metadata[
                                     "answer_repair_discard_reason"
-                                ] = "dropped_supported_required_items"
+                                ] = repair_validation_metadata.get("answer_repair_post_validation_reason") or "post_validation_failed"
                         if not repair_normalization_metadata.get("answer_repair_discarded"):
                             arbitration_trigger = self._repair_arbitration_trigger(
                                 query_task=query_task,
@@ -5870,6 +6264,12 @@ class AnswerGenerator:
                                         "answer_synthesis_safe_abstain_used"
                                     ] = True
                         repair_discarded = bool(repair_normalization_metadata.get("answer_repair_discarded"))
+                        list_repair_issue = issue in {"missing_supported_list_items", "abstain_despite_supported_list_items"}
+                        list_repair_success = bool(
+                            list_repair_issue
+                            and not repair_discarded
+                            and repair_normalization_metadata.get("answer_repair_list_coverage_improved")
+                        )
                         repair_metadata = {
                             **dict(initial_response.metadata or {}),
                             **dict(repaired.metadata or {}),
@@ -5881,8 +6281,8 @@ class AnswerGenerator:
                             "answer_repair_attempted": True,
                             "answer_repair_used": not repair_discarded,
                             "answer_specific_item_repair_used": issue in {"overgeneric_item", "scope_mismatched_extra_item"} and not repair_discarded,
-                            "answer_list_coverage_repair_used": issue in {"missing_supported_list_items", "abstain_despite_supported_list_items"} and not repair_discarded,
-                            "answer_list_coverage_repair_success": issue in {"missing_supported_list_items", "abstain_despite_supported_list_items"} and not repair_discarded,
+                            "answer_list_coverage_repair_used": list_repair_issue and not repair_discarded,
+                            "answer_list_coverage_repair_success": list_repair_success,
                             "answer_bridge_repair_used": issue == "bridge_alias_unresolved" and not repair_discarded,
                             "answer_bridge_repair_success": issue == "bridge_alias_unresolved" and not repair_discarded,
                             "answer_initial_text": initial_response.text,

@@ -26,7 +26,7 @@ from trajpatch.storage.models import (
     TrajectoryRecord,
     WikiPageRecord,
 )
-from trajpatch.storage.repository import TrajPatchStore
+from trajpatch.storage.repository import TrajWikiStore
 from trajpatch.types import NormalizedMessage, RetrievalBundle
 from trajpatch.utils.text import collapse_whitespace, extract_keywords, keyword_overlap_score
 
@@ -284,7 +284,7 @@ class RetrievalEngine:
 
     def __init__(
         self,
-        store: TrajPatchStore,
+        store: TrajWikiStore,
         embedding_provider,
         top_t_pages: int,
         top_k: int,
@@ -369,6 +369,20 @@ class RetrievalEngine:
         "dec": 12,
         "december": 12,
     }
+    _NUMBER_WORDS: dict[str, int] = {
+        "a": 1,
+        "an": 1,
+        "one": 1,
+        "two": 2,
+        "three": 3,
+        "four": 4,
+        "five": 5,
+        "six": 6,
+        "seven": 7,
+        "eight": 8,
+        "nine": 9,
+        "ten": 10,
+    }
 
     @classmethod
     def _parse_source_date(cls, occurred_at: str | None) -> date | None:
@@ -397,50 +411,236 @@ class RetrievalEngine:
         return f"{value.day} {value.strftime('%B')} {value.year}"
 
     @classmethod
+    def _parse_small_number(cls, value: str) -> int | None:
+        normalized = collapse_whitespace(value).casefold()
+        if normalized.isdigit():
+            return int(normalized)
+        return cls._NUMBER_WORDS.get(normalized)
+
+    @staticmethod
+    def _subtract_months(value: date, months: int) -> date:
+        month_index = value.year * 12 + value.month - 1 - months
+        year = month_index // 12
+        month = month_index % 12 + 1
+        day = min(value.day, 28)
+        return date(year, month, day)
+
+    @staticmethod
+    def _format_source_month_year(value: date) -> str:
+        return f"{value.strftime('%B')} {value.year}"
+
+    @classmethod
+    def _resolve_relative_temporal_anchors(cls, text: str, source_date: date) -> list[dict[str, str]]:
+        lowered = collapse_whitespace(text).casefold()
+        anchors: list[dict[str, str]] = []
+        seen_terms: set[str] = set()
+
+        def add_anchor(
+            *,
+            relative_term: str,
+            resolved_text: str,
+            resolution_kind: str,
+            resolution_granularity: str,
+            resolved_date: str | None = None,
+        ) -> None:
+            normalized_term = collapse_whitespace(relative_term).casefold()
+            if not normalized_term or normalized_term in seen_terms:
+                return
+            seen_terms.add(normalized_term)
+            anchor = {
+                "relative_term": normalized_term,
+                "resolved_text": collapse_whitespace(resolved_text),
+                "resolution_kind": resolution_kind,
+                "resolution_granularity": resolution_granularity,
+            }
+            if resolved_date:
+                anchor["resolved_date"] = resolved_date
+            anchors.append(anchor)
+
+        if re.search(r"\btoday\b", lowered):
+            resolved = cls._format_source_date(source_date)
+            add_anchor(
+                relative_term="today",
+                resolved_text=resolved,
+                resolution_kind="exact_date",
+                resolution_granularity="day",
+                resolved_date=resolved,
+            )
+        if re.search(r"\byesterday\b", lowered):
+            resolved = cls._format_source_date(source_date - timedelta(days=1))
+            add_anchor(
+                relative_term="yesterday",
+                resolved_text=resolved,
+                resolution_kind="exact_date",
+                resolution_granularity="day",
+                resolved_date=resolved,
+            )
+        if re.search(r"\btomorrow\b", lowered):
+            resolved = cls._format_source_date(source_date + timedelta(days=1))
+            add_anchor(
+                relative_term="tomorrow",
+                resolved_text=resolved,
+                resolution_kind="exact_date",
+                resolution_granularity="day",
+                resolved_date=resolved,
+            )
+
+        count_pattern = r"\d{1,2}|a|an|one|two|three|four|five|six|seven|eight|nine|ten"
+        for match in re.finditer(rf"\b({count_pattern})\s+days?\s+ago\b", lowered):
+            days = cls._parse_small_number(match.group(1))
+            if days is None:
+                continue
+            resolved = cls._format_source_date(source_date - timedelta(days=days))
+            add_anchor(
+                relative_term=match.group(0),
+                resolved_text=resolved,
+                resolution_kind="exact_date",
+                resolution_granularity="day",
+                resolved_date=resolved,
+            )
+
+        source_date_text = cls._format_source_date(source_date)
+        if re.search(r"\blast\s+week\b", lowered):
+            add_anchor(
+                relative_term="last week",
+                resolved_text=f"the week before {source_date_text}",
+                resolution_kind="relative_span",
+                resolution_granularity="week_span",
+            )
+        for match in re.finditer(r"\blast\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b", lowered):
+            weekday = match.group(1)
+            add_anchor(
+                relative_term=f"last {weekday}",
+                resolved_text=f"the {weekday.title()} before {source_date_text}",
+                resolution_kind="relative_span",
+                resolution_granularity="weekday_span",
+            )
+        if re.search(r"\blast\s+month\b", lowered):
+            resolved_month = cls._subtract_months(source_date, 1)
+            add_anchor(
+                relative_term="last month",
+                resolved_text=cls._format_source_month_year(resolved_month),
+                resolution_kind="month_year",
+                resolution_granularity="month",
+            )
+        if re.search(r"\blast\s+year\b", lowered):
+            add_anchor(
+                relative_term="last year",
+                resolved_text=str(source_date.year - 1),
+                resolution_kind="year",
+                resolution_granularity="year",
+            )
+
+        fuzzy_spans: list[tuple[int, int]] = []
+        fuzzy_pattern = rf"\b(?:(?:around|about)\s+({count_pattern})\s+years?\s+ago|a\s+few\s+years?\s+ago)\b"
+        for match in re.finditer(fuzzy_pattern, lowered):
+            fuzzy_spans.append(match.span())
+            add_anchor(
+                relative_term=match.group(0),
+                resolved_text=match.group(0),
+                resolution_kind="fuzzy_relative",
+                resolution_granularity="fuzzy",
+            )
+
+        def in_fuzzy_span(start: int, end: int) -> bool:
+            return any(start >= fuzzy_start and end <= fuzzy_end for fuzzy_start, fuzzy_end in fuzzy_spans)
+
+        for match in re.finditer(rf"\b({count_pattern})\s+months?\s+ago\b", lowered):
+            months = cls._parse_small_number(match.group(1))
+            if months is None:
+                continue
+            resolved_month = cls._subtract_months(source_date, months)
+            add_anchor(
+                relative_term=match.group(0),
+                resolved_text=cls._format_source_month_year(resolved_month),
+                resolution_kind="month_year",
+                resolution_granularity="month",
+            )
+        for match in re.finditer(rf"\b({count_pattern})\s+years?\s+ago\b", lowered):
+            if in_fuzzy_span(*match.span()):
+                continue
+            years = cls._parse_small_number(match.group(1))
+            if years is None:
+                continue
+            resolved = date(source_date.year - years, source_date.month, min(source_date.day, 28))
+            add_anchor(
+                relative_term=match.group(0),
+                resolved_text=cls._format_source_month_year(resolved),
+                resolution_kind="month_year",
+                resolution_granularity="month",
+            )
+        for match in re.finditer(rf"\b({count_pattern})\s+weeks?\s+ago\b", lowered):
+            weeks = cls._parse_small_number(match.group(1))
+            if weeks is None:
+                continue
+            label = match.group(1) if match.group(1).isdigit() else match.group(1)
+            unit = "week" if weeks == 1 else "weeks"
+            add_anchor(
+                relative_term=match.group(0),
+                resolved_text=f"{label} {unit} before {source_date_text}",
+                resolution_kind="relative_span",
+                resolution_granularity="week_span",
+            )
+        return anchors
+
+    @classmethod
     def _temporal_anchor_lines(cls, messages: list[RawMessageRecord]) -> tuple[list[str], dict[str, object]]:
         lines: list[str] = []
         source_refs: list[str] = []
         relative_terms: list[str] = []
+        resolutions: list[dict[str, object]] = []
         seen_lines: set[str] = set()
         seen_refs: set[str] = set()
         seen_terms: set[str] = set()
+        seen_resolutions: set[tuple[str, str, str, str, str]] = set()
         for message in messages:
             source_ref = cls._source_ref_label(message)
             source_date = cls._parse_source_date(message.occurred_at)
             if source_date is None:
                 continue
+            source_date_text = cls._format_source_date(source_date)
             text = collapse_whitespace(message.content)
-            lowered = text.casefold()
-            anchors: list[tuple[str, str]] = []
-            if re.search(r"\btoday\b", lowered):
-                anchors.append(('"today"', cls._format_source_date(source_date)))
-            if re.search(r"\byesterday\b", lowered):
-                anchors.append(('"yesterday"', cls._format_source_date(source_date - timedelta(days=1))))
-            if re.search(r"\btomorrow\b", lowered):
-                anchors.append(('"tomorrow"', cls._format_source_date(source_date + timedelta(days=1))))
-            for match in re.finditer(r"\b(\d{1,2})\s+days?\s+ago\b", lowered):
-                days = int(match.group(1))
-                anchors.append((f'"{match.group(0)}"', cls._format_source_date(source_date - timedelta(days=days))))
-            if re.search(r"\blast week\b", lowered):
-                anchors.append(('"last week"', f"approximately the week before {cls._format_source_date(source_date)}"))
+            anchors = cls._resolve_relative_temporal_anchors(text, source_date)
             if not anchors:
                 continue
             if source_ref not in seen_refs:
                 seen_refs.add(source_ref)
                 source_refs.append(source_ref)
-            for term, resolved in anchors:
-                normalized_term = term.strip('"')
+            for anchor in anchors:
+                normalized_term = anchor["relative_term"]
                 if normalized_term not in seen_terms:
                     seen_terms.add(normalized_term)
                     relative_terms.append(normalized_term)
-                line = f"- {source_ref} occurred at {cls._format_source_date(source_date)}; {term} refers to {resolved}."
+                line = f"- {source_ref} occurred at {source_date_text}; \"{normalized_term}\" refers to {anchor['resolved_text']}."
                 if line not in seen_lines:
                     seen_lines.add(line)
                     lines.append(line)
+                resolution_key = (
+                    source_ref,
+                    normalized_term,
+                    anchor["resolution_kind"],
+                    anchor["resolution_granularity"],
+                    anchor["resolved_text"],
+                )
+                if resolution_key in seen_resolutions:
+                    continue
+                seen_resolutions.add(resolution_key)
+                resolution: dict[str, object] = {
+                    "source_ref": source_ref,
+                    "source_date": source_date_text,
+                    "relative_term": normalized_term,
+                    "resolution_kind": anchor["resolution_kind"],
+                    "resolution_granularity": anchor["resolution_granularity"],
+                    "resolved_answer_text": anchor["resolved_text"],
+                }
+                if anchor.get("resolved_date"):
+                    resolution["resolved_date"] = anchor["resolved_date"]
+                resolutions.append(resolution)
         return lines, {
             "temporal_anchor_hint_count": len(lines),
             "temporal_anchor_source_refs": source_refs,
             "temporal_anchor_relative_terms": relative_terms,
+            "temporal_anchor_resolutions": resolutions,
         }
 
     @classmethod

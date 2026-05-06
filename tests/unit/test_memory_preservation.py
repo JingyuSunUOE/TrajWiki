@@ -248,6 +248,143 @@ def test_audit_claim_preservation_accepts_claim_text_exact_terms_and_facets() ->
     assert result.weak_source_links == []
 
 
+def test_audit_claim_preservation_requires_temporal_expression_when_candidate_has_one() -> None:
+    source = raw_records_from_normalized(
+        [_message("sample-m0001", "I talked at the school event last week.", speaker="Caroline")]
+    )
+    candidate = MustPreserveCandidate(
+        surface="school event",
+        category="event_type",
+        relation="event_type",
+        source_message_ids=["sample-m0001"],
+        temporal_expression="last week",
+    )
+    claim_without_time = MemoryClaim(
+        claim_id="tmp-c1",
+        status="active",
+        source_message_ids=["sample-m0001"],
+        text="Caroline talked at a school event.",
+    )
+    claim_with_time = MemoryClaim(
+        claim_id="tmp-c2",
+        status="active",
+        source_message_ids=["sample-m0001"],
+        text="Caroline talked at a school event last week.",
+    )
+
+    missing_result = audit_claim_preservation(
+        candidates=[candidate],
+        claims=[claim_without_time],
+        source_messages=source,
+    )
+    covered_result = audit_claim_preservation(
+        candidates=[candidate],
+        claims=[claim_with_time],
+        source_messages=source,
+    )
+
+    assert not missing_result.covered
+    assert [(row.surface, row.temporal_expression) for row in missing_result.missing_candidates] == [
+        ("school event", "last week")
+    ]
+    assert any(
+        row.get("coverage_rejected_reason") == "temporal_expression_missing"
+        for row in missing_result.diagnostics
+    )
+    assert covered_result.covered
+    assert covered_result.missing_candidates == []
+
+
+def test_preservation_candidate_fallback_text_keeps_temporal_expression() -> None:
+    candidate = MustPreserveCandidate(
+        surface="school event",
+        category="event_type",
+        source_message_ids=["sample-m0001"],
+        temporal_expression="last week",
+    )
+
+    text = MemoryOrchestrator._preservation_candidate_fallback_text(
+        candidate,
+        [_message("sample-m0001", "I talked at the school event last week.", speaker="Caroline")],
+    )
+
+    assert text == "Caroline mentioned school event as an event last week."
+
+
+def test_audit_claim_preservation_requires_word_number_temporal_expression() -> None:
+    source = raw_records_from_normalized(
+        [_message("sample-m0001", "I started lifting weights one year ago.", speaker="Evan")]
+    )
+    candidates = extract_must_preserve_candidates(source)
+    candidate = next(
+        row for row in candidates
+        if row.surface.casefold() == "lifting weights" and row.temporal_expression == "one year ago"
+    )
+    claim_without_time = MemoryClaim(
+        claim_id="tmp-c1",
+        status="active",
+        source_message_ids=["sample-m0001"],
+        text="Evan started lifting weights.",
+    )
+    claim_with_time = MemoryClaim(
+        claim_id="tmp-c2",
+        status="active",
+        source_message_ids=["sample-m0001"],
+        text="Evan started lifting weights one year ago.",
+    )
+
+    missing_result = audit_claim_preservation(
+        candidates=[candidate],
+        claims=[claim_without_time],
+        source_messages=source,
+    )
+    covered_result = audit_claim_preservation(
+        candidates=[candidate],
+        claims=[claim_with_time],
+        source_messages=source,
+    )
+    fallback_text = MemoryOrchestrator._preservation_candidate_fallback_text(
+        candidate,
+        [_message("sample-m0001", "I started lifting weights one year ago.", speaker="Evan")],
+    )
+
+    assert not missing_result.covered
+    assert missing_result.missing_candidates == [candidate]
+    assert any(
+        row.get("coverage_rejected_reason") == "temporal_expression_missing"
+        for row in missing_result.diagnostics
+    )
+    assert covered_result.covered
+    assert fallback_text == "Evan started lifting weights one year ago."
+
+
+def test_audit_claim_preservation_accepts_weekday_temporal_equivalent() -> None:
+    source = raw_records_from_normalized(
+        [_message("sample-m0001", "Last Friday I went to a council meeting for adoption.", speaker="Caroline")]
+    )
+    candidate = MustPreserveCandidate(
+        surface="adoption meeting",
+        category="event_type",
+        relation="event_type",
+        source_message_ids=["sample-m0001"],
+        temporal_expression="last Friday",
+    )
+    claim = MemoryClaim(
+        claim_id="tmp-c1",
+        status="active",
+        source_message_ids=["sample-m0001"],
+        text="Caroline went to an adoption meeting the Friday before the source date.",
+    )
+
+    result = audit_claim_preservation(
+        candidates=[candidate],
+        claims=[claim],
+        source_messages=source,
+    )
+
+    assert result.covered
+
+
 def test_audit_claim_preservation_requires_each_list_item() -> None:
     source = raw_records_from_normalized(
         [_message("sample-m0001", "My activities include pottery, camping, painting, and swimming.", speaker="Melanie")]

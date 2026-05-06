@@ -18,6 +18,7 @@ from trajpatch.analysis import (
 from trajpatch.analysis.failure_attribution import (
     _build_direct_vs_routed_retrieval_diagnostics,
     _build_offline_parameter_diagnostics,
+    _answer_synthesis_fields_from_row,
     _classify_grounded_answer_failure,
     _compute_direct_trajectory_ablation_fields,
     _compute_offline_parameter_fields,
@@ -39,7 +40,7 @@ from trajpatch.storage.models import (
     RetrievalEvent,
     WikiPageRecord,
 )
-from trajpatch.storage.repository import TrajPatchStore
+from trajpatch.storage.repository import TrajWikiStore
 from trajpatch.types import NormalizedMessage
 
 try:
@@ -99,6 +100,30 @@ def test_incomplete_run_diagnostics_loads_and_prints_run_failed(tmp_path: Path) 
     rendered = buffer.getvalue()
     assert "Incomplete Run Diagnostics" in rendered
     assert "TimeoutError" in rendered
+
+
+def test_answer_synthesis_fields_include_relative_span_temporal_target() -> None:
+    fields = _answer_synthesis_fields_from_row(
+        {
+            "metadata": {
+                "answer_metadata": {
+                    "answer_temporal_alignment_checked": True,
+                    "answer_temporal_selected_source_ref": "D3:1",
+                    "answer_temporal_selected_date": None,
+                    "answer_temporal_selected_answer_text": "the week before 9 June 2023",
+                    "answer_temporal_selected_resolution_kind": "relative_span",
+                    "answer_temporal_selected_resolution_granularity": "week_span",
+                    "answer_temporal_selected_relative_term": "last week",
+                    "answer_temporal_alignment_valid": True,
+                }
+            }
+        }
+    )
+
+    assert fields["answer_temporal_selected_answer_text"] == "the week before 9 June 2023"
+    assert fields["answer_temporal_selected_resolution_kind"] == "relative_span"
+    assert fields["answer_temporal_selected_resolution_granularity"] == "week_span"
+    assert fields["answer_temporal_selected_relative_term"] == "last week"
 
 
 def test_page_granularity_fields_prefer_compact_rows_and_mark_missing_metadata() -> None:
@@ -552,7 +577,7 @@ def test_temporal_grounding_fields_detect_missing_prompt_anchor() -> None:
 
 
 def _add_raw_messages(
-    store: TrajPatchStore,
+    store: TrajWikiStore,
     sample_id: str,
     raw_messages: list[dict[str, str]],
 ) -> dict[str, str]:
@@ -571,7 +596,7 @@ def _add_raw_messages(
 
 
 def _add_episodic_snapshot(
-    store: TrajPatchStore,
+    store: TrajWikiStore,
     *,
     sample_id: str,
     label: str,
@@ -627,7 +652,7 @@ def _add_episodic_snapshot(
 
 
 def _add_extra_snapshot(
-    store: TrajPatchStore,
+    store: TrajWikiStore,
     *,
     trajectory_id: str,
     ordinal: int,
@@ -699,7 +724,7 @@ def _build_run_from_specs(
     database_path = run_dir / "trajpatch.sqlite"
     session_factory = create_schema(database_path)
     session = session_factory()
-    store = TrajPatchStore(session)
+    store = TrajWikiStore(session)
 
     detail_rows: list[dict[str, object]] = []
     for ordinal, spec in enumerate(samples_spec, start=1):
@@ -3008,6 +3033,10 @@ def test_print_locomo_failure_report_smoke(tmp_path: Path):
                 "has_deterministic_fallback": True,
                 "has_discarded_repair": False,
             }
+            examples[0]["answer_temporal_alignment_checked"] = True
+            examples[0]["answer_temporal_selected_answer_text"] = "the week before 9 June 2023"
+            examples[0]["answer_temporal_selected_resolution_kind"] = "relative_span"
+            examples[0]["answer_temporal_selected_relative_term"] = "last week"
             break
     buffer = io.StringIO()
     console = Console(file=buffer, force_terminal=False, color_system=None)
@@ -3020,6 +3049,8 @@ def test_print_locomo_failure_report_smoke(tmp_path: Path):
     assert "Answer Synthesis Diagnostics" in output
     assert "Fallback / Repair Risk Diagnostics" in output
     assert "Fallback/repair:" in output
+    assert "selected_answer=the week before 9 June 2023" in output
+    assert "kind=relative_span" in output
     assert "Rank Diagnostics Over Failed Queries" in output
     assert "Facet / Fragmentation Diagnostics Over Failed Queries" in output
     assert "Wiki Fragmentation Diagnostics" in output

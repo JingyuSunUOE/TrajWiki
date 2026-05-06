@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 from trajpatch.storage.models import EpisodicMemorySnapshot
-from trajpatch.storage.repository import TrajPatchStore
+from trajpatch.storage.repository import TrajWikiStore
 
 
 class Inspector:
-    def __init__(self, store: TrajPatchStore) -> None:
+    def __init__(self, store: TrajWikiStore) -> None:
         self.store = store
 
     def trajectory(self, trajectory_id: str) -> dict:

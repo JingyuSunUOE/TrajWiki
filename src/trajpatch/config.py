@@ -1,4 +1,4 @@
-"""Configuration models for TrajPatch runs."""
+"""Configuration models for TrajWiki runs."""
 
 from __future__ import annotations
 

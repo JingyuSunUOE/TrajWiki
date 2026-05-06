@@ -1,11 +1,11 @@
-"""Custom exception types for TrajPatch."""
+"""Custom exception types for TrajWiki."""
 
 
-class TrajPatchError(Exception):
-    """Base exception for all TrajPatch failures."""
+class TrajWikiError(Exception):
+    """Base exception for all TrajWiki failures."""
 
 
-class ParserValidationError(TrajPatchError):
+class ParserValidationError(TrajWikiError):
     """Raised when an LLM text response cannot be parsed or validated."""
 
     def __init__(
@@ -33,19 +33,19 @@ class ParserValidationError(TrajPatchError):
         }
 
 
-class ProviderConfigurationError(TrajPatchError):
+class ProviderConfigurationError(TrajWikiError):
     """Raised when a provider cannot be initialized from the config."""
 
 
-class DatasetFormatError(TrajPatchError):
+class DatasetFormatError(TrajWikiError):
     """Raised when a dataset file cannot be parsed into the normalized format."""
 
 
-class RetrievalError(TrajPatchError):
+class RetrievalError(TrajWikiError):
     """Raised when retrieval cannot be executed safely."""
 
 
-class StructuredOutputError(TrajPatchError):
+class StructuredOutputError(TrajWikiError):
     """Raised when a provider-side structured output request cannot be completed safely."""
 
     def __init__(

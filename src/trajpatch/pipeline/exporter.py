@@ -4,12 +4,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from trajpatch.storage.repository import TrajPatchStore
+from trajpatch.storage.repository import TrajWikiStore
 from trajpatch.utils.json_utils import append_jsonl, dumps_json, write_json
 
 
 class ArtifactExporter:
-    def __init__(self, output_dir: Path, store: TrajPatchStore, *, run_dir: Path | None = None) -> None:
+    def __init__(self, output_dir: Path, store: TrajWikiStore, *, run_dir: Path | None = None) -> None:
         self.output_dir = output_dir
         self.run_dir = run_dir or output_dir
         self.store = store

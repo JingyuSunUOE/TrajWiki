@@ -177,14 +177,166 @@ def test_temporal_anchor_lines_resolve_relative_dates() -> None:
         occurred_at="3:00 pm on 25 May, 2022",
         metadata_json={},
     )
+    last_week_message = RawMessageRecord(
+        id="conv-26-m0035",
+        sample_id="conv-26",
+        dataset_name="locomo",
+        turn_index=35,
+        role="assistant",
+        speaker_name="Caroline",
+        content="I talked about my transgender journey at the school event last week.",
+        source_ref="D3:1",
+        occurred_at="7:55 pm on 9 June, 2023",
+        metadata_json={},
+    )
 
-    lines, metadata = RetrievalEngine._temporal_anchor_lines([message, today_message])
+    lines, metadata = RetrievalEngine._temporal_anchor_lines([message, today_message, last_week_message])
 
     assert any('D18:17 occurred at 20 October 2023; "yesterday" refers to 19 October 2023.' in line for line in lines)
     assert any('D13:9 occurred at 25 May 2022; "today" refers to 25 May 2022.' in line for line in lines)
-    assert metadata["temporal_anchor_hint_count"] == 2
-    assert metadata["temporal_anchor_source_refs"] == ["D18:17", "D13:9"]
-    assert metadata["temporal_anchor_relative_terms"] == ["yesterday", "today"]
+    assert any('D3:1 occurred at 9 June 2023; "last week" refers to the week before 9 June 2023.' in line for line in lines)
+    assert metadata["temporal_anchor_hint_count"] == 3
+    assert metadata["temporal_anchor_source_refs"] == ["D18:17", "D13:9", "D3:1"]
+    assert metadata["temporal_anchor_relative_terms"] == ["yesterday", "today", "last week"]
+    assert {
+        "source_ref": "D3:1",
+        "source_date": "9 June 2023",
+        "relative_term": "last week",
+        "resolution_kind": "relative_span",
+        "resolution_granularity": "week_span",
+        "resolved_answer_text": "the week before 9 June 2023",
+    } in metadata["temporal_anchor_resolutions"]
+
+
+def test_temporal_anchor_lines_resolve_extended_relative_dates() -> None:
+    messages = [
+        RawMessageRecord(
+            id="conv-49-m0224",
+            sample_id="conv-49",
+            dataset_name="locomo",
+            turn_index=224,
+            role="assistant",
+            speaker_name="Evan",
+            content="I started lifting weights one year ago and it has been a journey.",
+            source_ref="D12:2",
+            occurred_at="3:09 pm on 8 October, 2023",
+            metadata_json={},
+        ),
+        RawMessageRecord(
+            id="conv-26-m0061",
+            sample_id="conv-26",
+            dataset_name="locomo",
+            turn_index=61,
+            role="assistant",
+            speaker_name="Caroline",
+            content="Last Friday I went to an adoption meeting.",
+            source_ref="D8:9",
+            occurred_at="7:30 pm on 15 July, 2023",
+            metadata_json={},
+        ),
+        RawMessageRecord(
+            id="conv-41-m0233",
+            sample_id="conv-41",
+            dataset_name="locomo",
+            turn_index=233,
+            role="assistant",
+            speaker_name="John",
+            content="My colleagues and I went to a convention together last month.",
+            source_ref="D12:9",
+            occurred_at="3:00 pm on 18 April, 2023",
+            metadata_json={},
+        ),
+        RawMessageRecord(
+            id="conv-43-m0313",
+            sample_id="conv-43",
+            dataset_name="locomo",
+            turn_index=313,
+            role="assistant",
+            speaker_name="Tim",
+            content="I snapped that pic on my trip to the Smoky Mountains last year.",
+            source_ref="D14:16",
+            occurred_at="9:00 am on 17 October, 2023",
+            metadata_json={},
+        ),
+        RawMessageRecord(
+            id="conv-30-m0091",
+            sample_id="conv-30",
+            dataset_name="locomo",
+            turn_index=91,
+            role="assistant",
+            speaker_name="Gina",
+            content="Got the tattoo a few years ago, it stands for freedom.",
+            source_ref="D5:15",
+            occurred_at="1:00 pm on 8 February, 2023",
+            metadata_json={},
+        ),
+        RawMessageRecord(
+            id="conv-47-m0011",
+            sample_id="conv-47",
+            dataset_name="locomo",
+            turn_index=11,
+            role="assistant",
+            speaker_name="James",
+            content="Three days ago I bought myself an adventure book.",
+            source_ref="D8:11",
+            occurred_at="2:00 pm on 29 April, 2022",
+            metadata_json={},
+        ),
+    ]
+
+    lines, metadata = RetrievalEngine._temporal_anchor_lines(messages)
+    resolutions = metadata["temporal_anchor_resolutions"]
+
+    assert any('"one year ago" refers to October 2022' in line for line in lines)
+    assert {
+        "source_ref": "D12:2",
+        "source_date": "8 October 2023",
+        "relative_term": "one year ago",
+        "resolution_kind": "month_year",
+        "resolution_granularity": "month",
+        "resolved_answer_text": "October 2022",
+    } in resolutions
+    assert {
+        "source_ref": "D8:9",
+        "source_date": "15 July 2023",
+        "relative_term": "last friday",
+        "resolution_kind": "relative_span",
+        "resolution_granularity": "weekday_span",
+        "resolved_answer_text": "the Friday before 15 July 2023",
+    } in resolutions
+    assert {
+        "source_ref": "D12:9",
+        "source_date": "18 April 2023",
+        "relative_term": "last month",
+        "resolution_kind": "month_year",
+        "resolution_granularity": "month",
+        "resolved_answer_text": "March 2023",
+    } in resolutions
+    assert {
+        "source_ref": "D14:16",
+        "source_date": "17 October 2023",
+        "relative_term": "last year",
+        "resolution_kind": "year",
+        "resolution_granularity": "year",
+        "resolved_answer_text": "2022",
+    } in resolutions
+    assert {
+        "source_ref": "D5:15",
+        "source_date": "8 February 2023",
+        "relative_term": "a few years ago",
+        "resolution_kind": "fuzzy_relative",
+        "resolution_granularity": "fuzzy",
+        "resolved_answer_text": "a few years ago",
+    } in resolutions
+    assert {
+        "source_ref": "D8:11",
+        "source_date": "29 April 2022",
+        "relative_term": "three days ago",
+        "resolution_kind": "exact_date",
+        "resolution_granularity": "day",
+        "resolved_answer_text": "26 April 2022",
+        "resolved_date": "26 April 2022",
+    } in resolutions
 
 
 def test_coverage_aware_selection_prefers_complementary_trajectory_clusters(store) -> None:

@@ -971,6 +971,16 @@ def _answer_synthesis_fields_from_row(row: dict[str, Any]) -> dict[str, Any]:
         "answer_temporal_candidate_dates": list(answer_metadata.get("answer_temporal_candidate_dates") or []),
         "answer_temporal_selected_source_ref": answer_metadata.get("answer_temporal_selected_source_ref"),
         "answer_temporal_selected_date": answer_metadata.get("answer_temporal_selected_date"),
+        "answer_temporal_selected_answer_text": answer_metadata.get("answer_temporal_selected_answer_text"),
+        "answer_temporal_selected_resolution_kind": answer_metadata.get(
+            "answer_temporal_selected_resolution_kind"
+        ),
+        "answer_temporal_selected_resolution_granularity": answer_metadata.get(
+            "answer_temporal_selected_resolution_granularity"
+        ),
+        "answer_temporal_selected_relative_term": answer_metadata.get(
+            "answer_temporal_selected_relative_term"
+        ),
         "answer_temporal_selected_confidence": answer_metadata.get("answer_temporal_selected_confidence"),
         "answer_temporal_candidate_score": answer_metadata.get("answer_temporal_candidate_score"),
         "answer_temporal_candidate_match_terms": list(
@@ -8615,6 +8625,10 @@ def print_locomo_failure_report(
                         f"valid={_render_unknown(example.get('answer_temporal_alignment_valid'))}; "
                         f"selected_ref={_render_unknown(example.get('answer_temporal_selected_source_ref') or '-')}; "
                         f"selected_date={_render_unknown(example.get('answer_temporal_selected_date') or '-')}; "
+                        f"selected_answer={_render_unknown(example.get('answer_temporal_selected_answer_text') or '-')}; "
+                        f"kind={_render_unknown(example.get('answer_temporal_selected_resolution_kind') or '-')}; "
+                        f"granularity={_render_unknown(example.get('answer_temporal_selected_resolution_granularity') or '-')}; "
+                        f"relative={_render_unknown(example.get('answer_temporal_selected_relative_term') or '-')}; "
                         f"confidence={_render_unknown(example.get('answer_temporal_selected_confidence') or '-')}; "
                         f"score={_render_unknown(example.get('answer_temporal_candidate_score') if example.get('answer_temporal_candidate_score') is not None else '-')}; "
                         f"matched={_render_compact_json_list(list(example.get('answer_temporal_candidate_match_terms') or []))}; "

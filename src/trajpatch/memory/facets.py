@@ -150,9 +150,7 @@ _LIST_QUERY_PATTERNS = (
     "what locations",
     "which cities",
     "what types",
-    "what type",
     "what kinds",
-    "what kind",
 )
 _LIST_FAMILY_PATTERNS = (
     ("writing", ("screenplay", "screenplays", "script", "scripts", "what writings", "which writings", "what kind of writing", "what kind of fiction", "what writings does", "kind of writing")),
@@ -1233,6 +1231,8 @@ def is_list_like_query(question: str) -> bool:
     lowered = collapse_whitespace(question).casefold()
     if any(pattern in lowered for pattern in _LIST_QUERY_PATTERNS):
         return True
+    if re.search(r"\bwhat\s+kind\s+of\s+(?:writing|fiction)\b", lowered):
+        return True
     if any(pattern.search(lowered) for _, pattern in _LIST_FAMILY_REGEX_PATTERNS):
         return True
     return any(marker in lowered for marker in (" both ", " all "))
@@ -1244,6 +1244,13 @@ def classify_query_shape_v1(question: str, entity_lexicon: dict[str, str]) -> di
     entities = extract_entities_from_text(question, entity_lexicon)
     entity_keys = sorted({normalize_entity_key(value) for value in entities})
     list_like = is_list_like_query(question)
+    duration_count_like = bool(
+        re.search(
+            r"\bhow\s+many\s+(?:seconds?|minutes?|hours?|days?|weeks?|months?|years?)\b"
+            r".*\b(?:passed|pass|took|take|since|between|after|before|until|from)\b",
+            lowered,
+        )
+    )
     count_like = bool(
         lowered.startswith("how many")
         or " how many " in lowered
@@ -1278,7 +1285,7 @@ def classify_query_shape_v1(question: str, entity_lexicon: dict[str, str]) -> di
             if any(re.search(rf"\b{re.escape(verb)}\b", lowered) for verb in verbs):
                 item_family = family
                 break
-    if item_family and item_family != "count":
+    if item_family and item_family not in {"count", "type"}:
         list_like = True
     tags: list[str] = []
     if list_like:
@@ -1289,11 +1296,14 @@ def classify_query_shape_v1(question: str, entity_lexicon: dict[str, str]) -> di
         tags.append("comparison_like")
     if count_like:
         tags.append("count_like")
+    if duration_count_like:
+        tags.append("duration_count")
     return {
         "list_like": list_like,
         "multi_entity": multi_entity,
         "comparison_like": comparison_like,
         "count_like": count_like,
+        "duration_count_like": duration_count_like,
         "item_family": item_family,
         "entities": entities,
         "entity_keys": entity_keys,

@@ -1,4 +1,4 @@
-"""Typer CLI entrypoint for TrajPatch."""
+"""Typer CLI entrypoint for TrajWiki."""
 
 from __future__ import annotations
 
@@ -50,7 +50,7 @@ from trajpatch.pipeline.runner import PipelineRunner
 from trajpatch.pipeline.sweep import run_grid
 from trajpatch.reporting import SQLiteReportReader
 from trajpatch.storage.database import create_schema
-from trajpatch.storage.repository import TrajPatchStore
+from trajpatch.storage.repository import TrajWikiStore
 from trajpatch.utils.json_utils import write_json
 
 app = typer.Typer(no_args_is_help=True)
@@ -757,7 +757,7 @@ def inspect(
 ) -> None:
     session_factory = create_schema(database_path)
     session = session_factory()
-    inspector = Inspector(TrajPatchStore(session))
+    inspector = Inspector(TrajWikiStore(session))
     if trajectory_id:
         console.print_json(data=inspector.trajectory(trajectory_id))
         return
@@ -865,7 +865,7 @@ def export(
 ) -> None:
     session_factory = create_schema(database_path)
     session = session_factory()
-    store = TrajPatchStore(session)
+    store = TrajWikiStore(session)
     exporter = ArtifactExporter(output_dir, store)
     if sample_id is not None:
         exporter.export_sample_trajectories(sample_id)

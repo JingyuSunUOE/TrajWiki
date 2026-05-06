@@ -1,4 +1,4 @@
-"""TrajPatch offline Agent Memory framework."""
+"""TrajWiki offline Agent Memory framework."""
 
 from .config import RunConfig
 

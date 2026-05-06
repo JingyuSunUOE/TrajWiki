@@ -1126,6 +1126,192 @@ def test_answer_generator_temporal_alignment_does_not_select_bare_relative_sourc
     assert low_rows[0]["confidence"] == "low"
 
 
+def test_answer_generator_repairs_last_week_school_speech_to_relative_span():
+    payload = _answer_synthesis_payload("9 June 2023", answer_type="date")
+    payload["supporting_source_refs"] = ["D3:1"]
+    provider = _StructuredAnswerProvider(structured_payload=payload)
+    generator = AnswerGenerator(provider)
+    query_task = QueryTask(
+        query_task_id="conv-26_qa_8",
+        sample_id="conv-26",
+        question="When did Caroline give a speech at a school?",
+        metadata={"category_name": "temporal", "evidence_only_conversation": "[D3:1] school event"},
+    )
+    bundle = RetrievalBundle(
+        retrieval_event_id="retrieval-school-last-week",
+        selected_pages=[],
+        candidate_trajectories=[],
+        snapshot_hits=[],
+        expanded_snapshots=[],
+        source_message_ids=[],
+        source_message_refs=["D3:1"],
+        prompt_context=(
+            "[D3:1] Caroline: I went to a school event last week and talked about my transgender journey.\n"
+            '## Temporal Anchors\n- D3:1 occurred at 9 June 2023; "last week" refers to the week before 9 June 2023.'
+        ),
+        latency_ms=1.0,
+    )
+
+    _, response = generator.generate(query_task, bundle)
+
+    assert response.text == "the week before 9 June 2023"
+    assert response.metadata["answer_temporal_alignment_valid"] is True
+    assert response.metadata["answer_temporal_repair_used"] is True
+    assert response.metadata["answer_temporal_selected_source_ref"] == "D3:1"
+    assert response.metadata["answer_temporal_selected_date"] is None
+    assert response.metadata["answer_temporal_selected_answer_text"] == "the week before 9 June 2023"
+    assert response.metadata["answer_temporal_selected_resolution_kind"] == "relative_span"
+    assert response.metadata["answer_temporal_selected_resolution_granularity"] == "week_span"
+    assert response.metadata["answer_temporal_selected_relative_term"] == "last week"
+
+
+def test_answer_generator_repairs_last_week_picnic_to_relative_span():
+    payload = _answer_synthesis_payload("6 July 2023", answer_type="date")
+    payload["supporting_source_refs"] = ["D6:11"]
+    provider = _StructuredAnswerProvider(structured_payload=payload)
+    generator = AnswerGenerator(provider)
+    query_task = QueryTask(
+        query_task_id="conv-26_qa_21",
+        sample_id="conv-26",
+        question="When did Caroline have a picnic?",
+        metadata={"category_name": "temporal", "evidence_only_conversation": "[D6:11] picnic"},
+    )
+    bundle = RetrievalBundle(
+        retrieval_event_id="retrieval-picnic-last-week",
+        selected_pages=[],
+        candidate_trajectories=[],
+        snapshot_hits=[],
+        expanded_snapshots=[],
+        source_message_ids=[],
+        source_message_refs=["D6:11"],
+        prompt_context=(
+            "[D6:11] Caroline: We even had a picnic last week with friends and family.\n"
+            '## Temporal Anchors\n- D6:11 occurred at 6 July 2023; "last week" refers to approximately the week before 6 July 2023.'
+        ),
+        latency_ms=1.0,
+    )
+
+    _, response = generator.generate(query_task, bundle)
+
+    assert response.text == "the week before 6 July 2023"
+    assert response.metadata["answer_temporal_alignment_valid"] is True
+    assert response.metadata["answer_temporal_repair_used"] is True
+    assert response.metadata["answer_temporal_selected_answer_text"] == "the week before 6 July 2023"
+    assert response.metadata["answer_temporal_selected_resolution_kind"] == "relative_span"
+    assert response.metadata["answer_temporal_selected_resolution_granularity"] == "week_span"
+
+
+def test_answer_generator_repairs_one_year_ago_to_month_year_target():
+    payload = _answer_synthesis_payload("8 October 2023", answer_type="date")
+    payload["supporting_source_refs"] = ["D12:2"]
+    provider = _StructuredAnswerProvider(structured_payload=payload)
+    generator = AnswerGenerator(provider)
+    query_task = QueryTask(
+        query_task_id="conv-49_qa_58",
+        sample_id="conv-49",
+        question="When did Evan start lifting weights?",
+        metadata={"category_name": "temporal", "evidence_only_conversation": "[D12:2] lifting weights"},
+    )
+    bundle = RetrievalBundle(
+        retrieval_event_id="retrieval-lifting-one-year-ago",
+        selected_pages=[],
+        candidate_trajectories=[],
+        snapshot_hits=[],
+        expanded_snapshots=[],
+        source_message_ids=[],
+        source_message_refs=["D12:2"],
+        prompt_context=(
+            "[D12:2] Evan: I started lifting weights one year ago and it has been a journey.\n"
+            '## Temporal Anchors\n- D12:2 occurred at 8 October 2023; "one year ago" refers to October 2022.'
+        ),
+        latency_ms=1.0,
+    )
+
+    _, response = generator.generate(query_task, bundle)
+
+    assert response.text == "October 2022"
+    assert response.metadata["answer_temporal_alignment_valid"] is True
+    assert response.metadata["answer_temporal_repair_used"] is True
+    assert response.metadata["answer_temporal_selected_source_ref"] == "D12:2"
+    assert response.metadata["answer_temporal_selected_date"] is None
+    assert response.metadata["answer_temporal_selected_answer_text"] == "October 2022"
+    assert response.metadata["answer_temporal_selected_resolution_kind"] == "month_year"
+    assert response.metadata["answer_temporal_selected_resolution_granularity"] == "month"
+    assert response.metadata["answer_temporal_selected_relative_term"] == "one year ago"
+
+
+def test_answer_generator_repairs_last_friday_to_weekday_span_target():
+    payload = _answer_synthesis_payload("15 July 2023", answer_type="date")
+    payload["supporting_source_refs"] = ["D8:9"]
+    provider = _StructuredAnswerProvider(structured_payload=payload)
+    generator = AnswerGenerator(provider)
+    query_task = QueryTask(
+        query_task_id="conv-26_qa_28",
+        sample_id="conv-26",
+        question="When did Caroline go to the adoption meeting?",
+        metadata={"category_name": "temporal", "evidence_only_conversation": "[D8:9] adoption meeting"},
+    )
+    bundle = RetrievalBundle(
+        retrieval_event_id="retrieval-adoption-last-friday",
+        selected_pages=[],
+        candidate_trajectories=[],
+        snapshot_hits=[],
+        expanded_snapshots=[],
+        source_message_ids=[],
+        source_message_refs=["D8:9"],
+        prompt_context=(
+            "[D8:9] Caroline: Last Friday I went to a council meeting for adoption.\n"
+            '## Temporal Anchors\n- D8:9 occurred at 15 July 2023; "last friday" refers to the Friday before 15 July 2023.'
+        ),
+        latency_ms=1.0,
+    )
+
+    _, response = generator.generate(query_task, bundle)
+
+    assert response.text == "the Friday before 15 July 2023"
+    assert response.metadata["answer_temporal_alignment_valid"] is True
+    assert response.metadata["answer_temporal_repair_used"] is True
+    assert response.metadata["answer_temporal_selected_answer_text"] == "the Friday before 15 July 2023"
+    assert response.metadata["answer_temporal_selected_resolution_kind"] == "relative_span"
+    assert response.metadata["answer_temporal_selected_resolution_granularity"] == "weekday_span"
+
+
+def test_answer_generator_repairs_fuzzy_relative_without_source_date_collapse():
+    payload = _answer_synthesis_payload("8 February 2023", answer_type="date")
+    payload["supporting_source_refs"] = ["D5:15"]
+    provider = _StructuredAnswerProvider(structured_payload=payload)
+    generator = AnswerGenerator(provider)
+    query_task = QueryTask(
+        query_task_id="conv-30_qa_11",
+        sample_id="conv-30",
+        question="When did Gina get her tattoo?",
+        metadata={"category_name": "temporal", "evidence_only_conversation": "[D5:15] tattoo"},
+    )
+    bundle = RetrievalBundle(
+        retrieval_event_id="retrieval-tattoo-fuzzy",
+        selected_pages=[],
+        candidate_trajectories=[],
+        snapshot_hits=[],
+        expanded_snapshots=[],
+        source_message_ids=[],
+        source_message_refs=["D5:15"],
+        prompt_context=(
+            "[D5:15] Gina: Got the tattoo a few years ago, it stands for freedom.\n"
+            '## Temporal Anchors\n- D5:15 occurred at 8 February 2023; "a few years ago" refers to a few years ago.'
+        ),
+        latency_ms=1.0,
+    )
+
+    _, response = generator.generate(query_task, bundle)
+
+    assert response.text == "a few years ago"
+    assert response.metadata["answer_temporal_alignment_valid"] is True
+    assert response.metadata["answer_temporal_repair_used"] is True
+    assert response.metadata["answer_temporal_selected_answer_text"] == "a few years ago"
+    assert response.metadata["answer_temporal_selected_resolution_kind"] == "fuzzy_relative"
+    assert response.metadata["answer_temporal_selected_resolution_granularity"] == "fuzzy"
+
+
 def test_answer_generator_temporal_alignment_safe_abstains_when_only_unrelated_dates_exist():
     payload = _answer_synthesis_payload("21 October 2023", answer_type="date")
     payload["supporting_source_refs"] = ["D19:2"]
@@ -2337,6 +2523,181 @@ def test_answer_generator_repairs_missing_supported_list_items():
     assert response.metadata["answer_postcheck_issue"] == "missing_supported_list_items"
     assert response.metadata["answer_missing_supported_list_items"] == ["live music event"]
     assert response.metadata["answer_list_coverage_repair_used"] is True
+
+
+def test_answer_generator_does_not_list_repair_single_value_kind_question():
+    provider = _AnswerRepairProvider(["Jolene was working on an electrical engineering project at the beginning of January 2023."])
+    generator = AnswerGenerator(provider)
+    query_task = QueryTask(
+        query_task_id="conv-48_qa_0",
+        sample_id="conv-48",
+        question="What kind of project was Jolene working on in the beginning of January 2023?",
+        metadata={"category_name": "multi_hop", "evidence_only_conversation": "[D1:2] electrical engineering project"},
+    )
+    bundle = RetrievalBundle(
+        retrieval_event_id="retrieval-single-value-type",
+        selected_pages=[],
+        candidate_trajectories=[],
+        snapshot_hits=[],
+        expanded_snapshots=[],
+        source_message_ids=[],
+        source_message_refs=["D1:2"],
+        prompt_context="[D1:2] Jolene finished an electrical engineering project last week.",
+        latency_ms=1.0,
+        metadata={
+            "grounded_source_surface_terms": [
+                "Jolene finished an electrical engineering project last week",
+                "programming",
+                "sustainable water purifier",
+            ],
+            "grounded_exact_terms": ["electrical engineering project", "programming", "sustainable water purifier"],
+            "grounded_display_items": ["electrical engineering project", "sustainable water purifier"],
+            "grounded_display_counts": [],
+            "grounded_display_key_facts": ["Jolene finished an electrical engineering project last week."],
+        },
+    )
+
+    _, response = generator.generate(query_task, bundle)
+
+    assert response.text == "Jolene was working on an electrical engineering project at the beginning of January 2023."
+    assert response.metadata["answer_postcheck_issue"] is None
+    assert response.metadata["answer_list_coverage_skipped"] is True
+    assert response.metadata["answer_list_coverage_skip_reason"] == "value_question"
+    assert response.metadata["answer_list_coverage_repair_used"] is False
+    assert len(provider.calls) == 1
+
+
+def test_answer_generator_does_not_list_repair_duration_count_question():
+    provider = _AnswerRepairProvider(["After about 11 weeks, Tim reconnected with the fellow Harry Potter fan from California."])
+    generator = AnswerGenerator(provider)
+    query_task = QueryTask(
+        query_task_id="conv-43_qa_16",
+        sample_id="conv-43",
+        question="After how many weeks did Tim reconnect with the fellow Harry Potter fan from California?",
+        metadata={"category_name": "multi_hop", "evidence_only_conversation": "[D4:7] three weeks"},
+    )
+    bundle = RetrievalBundle(
+        retrieval_event_id="retrieval-duration-count",
+        selected_pages=[],
+        candidate_trajectories=[],
+        snapshot_hits=[],
+        expanded_snapshots=[],
+        source_message_ids=[],
+        source_message_refs=["D4:7"],
+        prompt_context="[D4:7] Tim reconnected with a fellow Harry Potter fan from California after three weeks.",
+        latency_ms=1.0,
+        metadata={
+            "grounded_source_surface_terms": [
+                "Harry Potter fan project",
+                "discussing collaborations",
+                "characters, spells",
+                "London",
+            ],
+            "grounded_exact_terms": ["Harry Potter fan project", "discussing collaborations", "London"],
+            "grounded_display_items": ["Harry Potter fan project", "London"],
+            "grounded_display_counts": [],
+            "grounded_display_key_facts": ["Tim reconnected after three weeks."],
+        },
+    )
+
+    _, response = generator.generate(query_task, bundle)
+
+    assert response.text == "After about 11 weeks, Tim reconnected with the fellow Harry Potter fan from California."
+    assert response.metadata["answer_postcheck_issue"] is None
+    assert response.metadata["answer_list_coverage_skipped"] is True
+    assert response.metadata["answer_list_coverage_skip_reason"] == "duration_count_question"
+    assert response.metadata["answer_missing_supported_list_items"] == []
+    assert len(provider.calls) == 1
+
+
+def test_answer_generator_does_not_list_repair_single_value_activity_question():
+    provider = _AnswerRepairProvider(["Sam takes up painting classes in October 2023."])
+    generator = AnswerGenerator(provider)
+    query_task = QueryTask(
+        query_task_id="conv-49_qa_60",
+        sample_id="conv-49",
+        question="Which new activity does Sam take up in October 2023?",
+        metadata={"category_name": "multi_hop", "evidence_only_conversation": "[D9:4] kayaking"},
+    )
+    bundle = RetrievalBundle(
+        retrieval_event_id="retrieval-single-activity",
+        selected_pages=[],
+        candidate_trajectories=[],
+        snapshot_hits=[],
+        expanded_snapshots=[],
+        source_message_ids=[],
+        source_message_refs=["D9:4"],
+        prompt_context="[D9:4] Sam started kayaking in October 2023.",
+        latency_ms=1.0,
+        metadata={
+            "grounded_source_surface_terms": ["hiking", "trying painting", "paint set", "watercolors"],
+            "grounded_exact_terms": ["hiking", "painting", "watercolors"],
+            "grounded_display_items": ["hiking", "painting classes", "watercolors"],
+            "grounded_display_counts": [],
+            "grounded_display_key_facts": ["Sam was thinking about trying painting."],
+        },
+    )
+
+    _, response = generator.generate(query_task, bundle)
+
+    assert response.text == "Sam takes up painting classes in October 2023."
+    assert response.metadata["answer_postcheck_issue"] is None
+    assert response.metadata["answer_list_coverage_skipped"] is True
+    assert response.metadata["answer_list_coverage_skip_reason"] == "value_question"
+    assert response.metadata["answer_missing_supported_list_items"] == []
+    assert len(provider.calls) == 1
+
+
+def test_answer_generator_discards_list_repair_when_missing_items_do_not_improve():
+    provider = _AnswerRepairProvider(["John attended a violin concert.", "John attended a violin concert."])
+    generator = AnswerGenerator(provider)
+    query_task = QueryTask(
+        query_task_id="conv-41_qa_36",
+        sample_id="conv-41",
+        question="What music events has John attended?",
+        metadata={"category_name": "multi_hop", "evidence_only_conversation": "[D1:1] live music event"},
+    )
+    bundle = RetrievalBundle(
+        retrieval_event_id="retrieval-list-missing-no-improvement",
+        selected_pages=[],
+        candidate_trajectories=[],
+        snapshot_hits=[],
+        expanded_snapshots=[],
+        source_message_ids=[],
+        source_message_refs=["D1:1", "D2:3"],
+        prompt_context="[D1:1] John attended a live music event.\n[D2:3] John attended a violin concert.",
+        latency_ms=1.0,
+        metadata={
+            "query_shape": {
+                "list_like": True,
+                "multi_entity": False,
+                "comparison_like": False,
+                "count_like": False,
+                "item_family": "event",
+                "tags": ["list_like"],
+            },
+            "grounded_source_surface_terms": ["live music event", "violin concert"],
+            "grounded_exact_terms": ["live music event", "violin concert"],
+            "grounded_display_items": ["live music event", "violin concert"],
+            "grounded_display_counts": [],
+            "grounded_display_key_facts": [
+                "John attended a live music event.",
+                "John attended a violin concert.",
+            ],
+        },
+    )
+
+    _, response = generator.generate(query_task, bundle)
+
+    assert response.text == "John attended a violin concert."
+    assert response.metadata["answer_postcheck_issue"] == "missing_supported_list_items"
+    assert response.metadata["answer_repair_used"] is False
+    assert response.metadata["answer_repair_discarded"] is True
+    assert response.metadata["answer_repair_discard_reason"] == "list_coverage_not_improved"
+    assert response.metadata["answer_repair_preserved_initial_answer"] is True
+    assert response.metadata["answer_list_coverage_repair_used"] is False
+    assert response.metadata["answer_list_coverage_repair_success"] is False
+    assert response.metadata["answer_repair_missing_required_items_after_repair"] == ["live music event"]
 
 
 def test_answer_generator_repairs_event_list_scope_extras_and_keeps_required_items():

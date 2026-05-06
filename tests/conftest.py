@@ -6,7 +6,7 @@ import pytest
 
 from trajpatch.config import RunConfig
 from trajpatch.storage.database import create_schema
-from trajpatch.storage.repository import TrajPatchStore
+from trajpatch.storage.repository import TrajWikiStore
 
 
 @pytest.fixture()
@@ -28,7 +28,7 @@ def run_config(tmp_path: Path) -> RunConfig:
 
 
 @pytest.fixture()
-def store(run_config: RunConfig) -> TrajPatchStore:
+def store(run_config: RunConfig) -> TrajWikiStore:
     session_factory = create_schema(run_config.database_path)
     session = session_factory()
-    return TrajPatchStore(session)
+    return TrajWikiStore(session)

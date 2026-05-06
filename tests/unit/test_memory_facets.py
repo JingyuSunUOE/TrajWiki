@@ -376,6 +376,7 @@ def test_is_list_like_query_detects_inventory_questions():
     assert is_list_like_query("What desserts has Maria made?")
     assert is_list_like_query("What shelters did Nora mention?")
     assert is_list_like_query("What kind of writing does Tim do?")
+    assert not is_list_like_query("What kind of project was Jolene working on?")
     assert is_list_like_query("What do Melanie's kids like?")
     assert is_list_like_query("What are Dave's dreams?")
     assert is_list_like_query("Who or which organizations have been the beneficiaries?")
@@ -405,6 +406,14 @@ def test_classify_query_shape_v1_detects_list_comparison_and_count_patterns():
     dream_shape = classify_query_shape_v1("What are Dave's dreams?", lexicon)
     organization_shape = classify_query_shape_v1("Who or which organizations have been the beneficiaries?", lexicon)
     single_fact_shape = classify_query_shape_v1("Where did Caroline move from four years ago?", lexicon)
+    kind_project_shape = classify_query_shape_v1(
+        "What kind of project was Jolene working on in the beginning of January 2023?",
+        lexicon,
+    )
+    duration_count_shape = classify_query_shape_v1(
+        "How many weeks passed between Maria adopting Coco and Shadow?",
+        lexicon,
+    )
 
     assert comparison_shape["list_like"] is True
     assert comparison_shape["multi_entity"] is True
@@ -438,3 +447,8 @@ def test_classify_query_shape_v1_detects_list_comparison_and_count_patterns():
     assert organization_shape["list_like"] is True
     assert organization_shape["item_family"] == "organization"
     assert single_fact_shape["list_like"] is False
+    assert kind_project_shape["list_like"] is False
+    assert kind_project_shape["item_family"] == "type"
+    assert duration_count_shape["count_like"] is True
+    assert duration_count_shape["duration_count_like"] is True
+    assert "duration_count" in duration_count_shape["tags"]

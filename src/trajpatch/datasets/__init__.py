@@ -1,4 +1,4 @@
-"""Dataset adapters for TrajPatch."""
+"""Dataset adapters for TrajWiki."""
 
 from .factory import build_dataset_adapter
 

@@ -1,4 +1,4 @@
-"""Shared runtime types used across the TrajPatch codebase."""
+"""Shared runtime types used across the TrajWiki codebase."""
 
 from __future__ import annotations
 

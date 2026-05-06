@@ -186,7 +186,7 @@ class SQLiteReportReader:
         return ordered
 
     def _build_locomo_table(self, rows: list[dict[str, Any]]) -> Table:
-        table = Table(title="TrajPatch LOCOMO Runs")
+        table = Table(title="TrajWiki LOCOMO Runs")
         for column in [
             "run_id",
             "dataset",
@@ -222,7 +222,7 @@ class SQLiteReportReader:
         return table
 
     def _build_medmt_table(self, rows: list[dict[str, Any]]) -> Table:
-        table = Table(title="TrajPatch MedMT Runs")
+        table = Table(title="TrajWiki MedMT Runs")
         for column in [
             "run_id",
             "dataset",

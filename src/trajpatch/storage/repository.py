@@ -1,4 +1,4 @@
-"""Repository helpers for persisting and querying TrajPatch state."""
+"""Repository helpers for persisting and querying TrajWiki state."""
 
 from __future__ import annotations
 
@@ -47,7 +47,7 @@ def _restore_datetime_fields(payload: dict[str, Any]) -> dict[str, Any]:
     return restored
 
 
-class TrajPatchStore:
+class TrajWikiStore:
     """Thin repository layer around the SQLAlchemy session."""
 
     def __init__(self, session: Session) -> None:

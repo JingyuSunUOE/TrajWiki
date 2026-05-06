@@ -71,7 +71,7 @@ from trajpatch.storage.models import (
     RunMetaRecord,
     TrajectoryRecord,
 )
-from trajpatch.storage.repository import TrajPatchStore
+from trajpatch.storage.repository import TrajWikiStore
 from trajpatch.types import (
     AnswerResult,
     DatasetSample,
@@ -1062,7 +1062,7 @@ class PipelineRunner:
                     candidate.unlink()
         self.session_factory = create_schema(self.config.database_path)
         self.session = self.session_factory()
-        self.store = TrajPatchStore(self.session)
+        self.store = TrajWikiStore(self.session)
         self.orchestrator = MemoryOrchestrator(
             self.config,
             self.store,
@@ -1160,7 +1160,7 @@ class PipelineRunner:
                 candidate.unlink()
         self.session_factory = create_schema(database_path, profile="worker_shard")
         self.session = self.session_factory()
-        self.store = TrajPatchStore(self.session)
+        self.store = TrajWikiStore(self.session)
         self.orchestrator = MemoryOrchestrator(
             self.config,
             self.store,
