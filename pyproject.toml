@@ -3,12 +3,19 @@ requires = ["setuptools>=69", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "trajpatch"
+name = "trajwiki"
 version = "0.1.0"
-description = "Long-memory benchmark framework with episodic trajectories, wiki routing, OpenAI-compatible providers, and evidence-grounded evaluation."
+description = "Long-memory benchmark framework with source-grounded trajectories, wiki routing, offline ablations, cost-benefit analysis, and auditability diagnostics."
 readme = "README.md"
 requires-python = ">=3.11"
-authors = [{ name = "OpenAI Codex" }]
+authors = [{ name = "TrajWiki Contributors" }]
+keywords = [
+  "long-term-memory",
+  "retrieval-augmented-generation",
+  "benchmark",
+  "auditability",
+  "interpretability",
+]
 dependencies = [
   "typer>=0.12",
   "pydantic>=2.8",
@@ -47,6 +54,7 @@ dev = [
 ]
 
 [project.scripts]
+trajwiki = "trajpatch.cli:app"
 trajpatch = "trajpatch.cli:app"
 
 [tool.setuptools]

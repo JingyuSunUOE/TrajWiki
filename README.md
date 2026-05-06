@@ -3,7 +3,8 @@
 TrajWiki is an offline benchmark framework for long-memory question answering. It builds
 source-grounded episodic memory trajectories, compiles a per-sample wiki routing layer,
 retrieves compact evidence, generates grounded answers, and stores detailed diagnostics for
-failure analysis.
+failure analysis, offline counterfactual ablations, cost-benefit analysis, and auditability
+evaluation.
 
 ## What The Pipeline Does
 
@@ -19,7 +20,8 @@ For each logical sample, TrajWiki runs a fixed memory-and-evaluation pipeline:
 8. Apply deterministic and type-specific validation for date, count, list, place, bridge,
    and abstention cases.
 9. Evaluate answers with semantic `F1`, `BLEU-1`, and an LLM judge.
-10. Persist SQLite records, memory exports, summary/detail JSON, and analysis artifacts.
+10. Persist SQLite records, memory exports, summary/detail JSON, and optional analysis
+    artifacts for retrieval ablation, cost analysis, and provenance auditing.
 
 The default LOCOMO answer path is `freeform_v2`. The older structured
 `answer_evidence_synthesis` path remains as a legacy fallback, not the default.
@@ -94,9 +96,13 @@ optional `quant` extra only adds quantization-specific packages such as `bitsand
 Check the CLI:
 
 ```bash
+trajwiki --help
 trajpatch --help
 PYTHONPATH=src python -m trajpatch --help
 ```
+
+`trajwiki` is the preferred console command. `trajpatch` and `python -m trajpatch` remain
+available for backward compatibility with older scripts and cache/database paths.
 
 Remote providers read API keys from environment variables or `.env`:
 
@@ -157,12 +163,22 @@ PYTHONPATH=src python -m trajpatch benchmark-locomo \
   --neighbor-radius 1 \
   --retrieval-expansion-mode update_linked_plus_neighbors \
   --memory-extract-batch-size auto \
-  --judge-max-concurrency 4 \
-  --conv-workers 4 \
+  --judge-max-concurrency 6 \
+  --conv-workers 5 \
+  --ablation-diagnostics \
+  --retrieval-rank-save-mode full \
+  --cost-diagnostics \
+  --cost-call-save-mode compact \
+  --auditability-diagnostics \
+  --audit-packet-save-mode compact \
   --rebuild-memory-cache \
   --rebuild-semantic-metric-cache \
   --verbose
 ```
+
+The diagnostic flags above do not add extra answer-generation calls. They write compact
+JSON/JSONL/CSV artifacts that can later be analyzed offline. For quick smoke tests, leave
+them disabled.
 
 ### LOCOMO With Local vLLM
 
@@ -326,6 +342,12 @@ PYTHONPATH=src python -m trajpatch run \
 - `export`: export trajectory artifacts from a run database.
 - `analyze-failures`: LOCOMO failure attribution for a run or subset directory.
 - `analyze-failures-diff`: compare two LOCOMO failure reports.
+- `analyze-offline-ablation`: build offline counterfactual retrieval/context ablation
+  tables from one completed LOCOMO run.
+- `analyze-cost-benefit`: build cost breakdown, amortization, and memory/candidate scaling
+  tables from one completed LOCOMO run.
+- `analyze-auditability`: build source-support, unsupported-risk, failure-localization,
+  conflict/obsolete, and audit-packet tables from one completed LOCOMO run.
 
 Run any command with `--help` for the full option list.
 
@@ -372,6 +394,34 @@ Run any command with `--help` for the full option list.
 - `--cuda-preflight-reserve-gb`: per-GPU safety reserve used by preflight estimates.
 - `--cuda-preflight-report/--no-cuda-preflight-report`: write or suppress
   `status/cuda_preflight.json`.
+
+For remote-like providers, `--memory-extract-batch-size auto` is worker-aware. For example,
+`--conv-workers 5` resolves the per-worker memory extraction batch conservatively instead
+of multiplying into an excessive remote-call burst. Run-level analysis artifacts are written
+only by the main process after worker SQLite shards have been merged, so sharded workers do
+not concurrently append to the same analysis JSONL files.
+
+### Offline Diagnostic Options
+
+These options are disabled by default and are intended mainly for LOCOMO paper runs:
+
+- `--ablation-diagnostics`: save gold labels and full retrieval ranking diagnostics.
+- `--retrieval-rank-save-mode`: `top-n` or `full`; use `full` for offline ablations.
+- `--retrieval-rank-save-limit`: top-N retention when rank save mode is `top-n`.
+- `--offline-context-budgets`: comma-separated context budgets recorded in run metadata.
+- `--offline-rank-cutoffs`: comma-separated rank cutoffs recorded in run metadata.
+- `--cost-diagnostics`: save compact cost query/call rows for offline cost analysis.
+- `--cost-call-save-mode`: `summary` or `compact`; use `compact` for paper runs.
+- `--cost-price-config`: optional pricing JSON for dollar-cost estimates.
+- `--future-query-counts`: comma-separated future query counts for amortization curves.
+- `--auditability-diagnostics`: save provenance, answer support, claim lifecycle, and audit
+  packet rows.
+- `--audit-packet-save-mode`: `summary` or `compact`; `compact` includes short source and
+  claim previews, never embedding vectors.
+
+The LOCOMO-only diagnostic writers are skipped on MedMT runs even if the flags are present.
+This lets shared scripts pass the same option set to both benchmarks without producing
+misleading MedMT ablation/audit artifacts.
 
 ### Provider Modes
 
@@ -450,11 +500,39 @@ memories/<sample_id>/wiki/<page_id>.md
 memories/<sample_id>/wiki/<page_id>.json
 ```
 
-LOCOMO analysis artifacts produced during evaluation or by `analyze-failures`:
+LOCOMO analysis artifacts produced during evaluation or by offline analysis commands:
 
 ```text
 analysis/text_only_filter_manifest.json
 analysis/text_only_filtered_summary.json
+analysis/gold_labels.jsonl
+analysis/offline_ablation_rows.jsonl
+analysis/offline_ablation_summary.json
+analysis/offline_ablation_table.csv
+analysis/evidence_funnel.csv
+analysis/cost_recall_curve.csv
+analysis/variant_examples.jsonl
+analysis/cost_call_rows.jsonl
+analysis/cost_query_rows.jsonl
+analysis/cost_phase_summary.csv
+analysis/cost_quality_table.csv
+analysis/amortization_break_even.csv
+analysis/amortized_cost_curve.csv
+analysis/memory_scaling.csv
+analysis/candidate_scaling.csv
+analysis/cost_benefit_summary.json
+analysis/answer_support_rows.jsonl
+analysis/answer_context_claim_rows.jsonl
+analysis/claim_lifecycle_rows.jsonl
+analysis/audit_packet_rows.jsonl
+analysis/auditability_rows.jsonl
+analysis/auditability_summary.json
+analysis/source_support_table.csv
+analysis/unsupported_answer_table.csv
+analysis/failure_localization_table.csv
+analysis/conflict_obsolete_table.csv
+analysis/audit_packet_cost.csv
+analysis/audit_examples.jsonl
 analysis/direct_retrieval_ablation.json
 analysis/direct_retrieval_rows.jsonl
 analysis/trajectory_drift_diagnostics.json
@@ -496,6 +574,42 @@ PYTHONPATH=src python -m trajpatch analyze-failures-diff \
   --before output/baseline/locomo/multi_hop \
   --after output/experiment/locomo/multi_hop
 ```
+
+Offline counterfactual retrieval/context ablation:
+
+```bash
+trajwiki analyze-offline-ablation output/remote/locomo/multi_hop/<run_id> \
+  --variants full,no_wiki_direct,wiki_only,flat_raw,snapshot_m1,snapshot_m2,source_supported_only \
+  --budgets 4000,8000,16000,32000 \
+  --rank-cutoffs 5,10,15,20,30,50
+```
+
+Offline cost-benefit and scalability analysis:
+
+```bash
+trajwiki analyze-cost-benefit output/remote/locomo/multi_hop/<run_id> \
+  --baselines trajwiki_observed,full_context_proxy,no_wiki_direct,flat_raw,wiki_only \
+  --price-config configs/pricing/gpt-4o-mini.example.json \
+  --future-query-counts 1,2,5,10,20,50,100
+```
+
+The example pricing file intentionally contains `null` prices. Fill in the exact provider
+prices for the run date before reporting dollar costs; token and latency tables are still
+generated without prices.
+
+Offline auditability and interpretability analysis:
+
+```bash
+trajwiki analyze-auditability output/remote/locomo/multi_hop/<run_id> \
+  --baselines trajwiki_observed,full_context_proxy,no_wiki_direct,flat_raw,wiki_only \
+  --audit-labels audit_labels.csv
+```
+
+`--audit-labels` is optional. Without labels, TrajWiki reports proxy or observable metrics
+such as source-supported answer rate proxy, unsupported-answer risk, failure-localization
+distribution, deprecated-claim leakage proxy, and audit packet cost. With labels, it also
+reports accuracy/F1 for labeled conflict, obsolete-claim, failure-localization, and human
+audit fields.
 
 Inspect aggregate results:
 
@@ -569,11 +683,17 @@ Run focused tests while editing:
 ```bash
 PYTHONPATH=src pytest -q tests/unit/test_answering_prompts.py
 PYTHONPATH=src pytest -q tests/unit/test_failure_attribution.py
+PYTHONPATH=src pytest -q tests/unit/test_offline_ablation.py
+PYTHONPATH=src pytest -q tests/unit/test_cost_benefit.py
+PYTHONPATH=src pytest -q tests/unit/test_auditability.py
 PYTHONPATH=src pytest -q tests/unit/test_llm_text_parsers.py
 PYTHONPATH=src pytest -q tests/unit/test_openai_compatible_provider.py
 PYTHONPATH=src pytest -q tests/unit/test_vllm_server_manager.py
 PYTHONPATH=src pytest -q tests/integration/test_run_index_and_report.py
 PYTHONPATH=src pytest -q tests/integration/test_batch_modes.py
+PYTHONPATH=src pytest -q tests/integration/test_offline_ablation_artifacts.py
+PYTHONPATH=src pytest -q tests/integration/test_cost_benefit_artifacts.py
+PYTHONPATH=src pytest -q tests/integration/test_auditability_artifacts.py
 ```
 
 Run the full suite:
@@ -597,7 +717,10 @@ Recommended reading order for new contributors:
 4. `src/trajpatch/memory/wiki.py`
 5. `src/trajpatch/pipeline/answering.py`
 6. `src/trajpatch/analysis/failure_attribution.py`
-7. `src/trajpatch/storage/models.py`
+7. `src/trajpatch/analysis/offline_ablation.py`
+8. `src/trajpatch/analysis/cost_benefit.py`
+9. `src/trajpatch/analysis/auditability.py`
+10. `src/trajpatch/storage/models.py`
 
 ## Design Notes
 
