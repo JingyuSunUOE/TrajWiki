@@ -115,6 +115,10 @@ def _launcher_fixture(
     docker_log = tmp_path / "docker.log"
     kubectl_log = tmp_path / "kubectl.log"
     kubectl_state = tmp_path / "kubectl.state"
+    log_probe_state = tmp_path / "log-probe.state"
+    log_probe_ready = tmp_path / "log-probe.ready"
+    log_follow_state = tmp_path / "log-follow.state"
+    log_follow_ready = tmp_path / "log-follow.ready"
     _write_executable(
         fake_bin / "git",
         """#!/usr/bin/env bash
@@ -187,6 +191,12 @@ fi
 if [[ "$1" == "get" && "$2" == "job" ]]; then
     job="$3"
     if [[ "$*" == *".status.succeeded"* ]]; then
+        if (( FAKE_LOG_PROBE_FAILURES > 0 )) && [[ ! -e "$FAKE_LOG_PROBE_READY" ]]; then
+            exit 0
+        fi
+        if (( FAKE_LOG_FOLLOW_FAILURES > 0 )) && [[ ! -e "$FAKE_LOG_FOLLOW_READY" ]]; then
+            exit 0
+        fi
         if [[ "$FAKE_FAIL_FIRST_FORMAL" == "1" && "$job" == *"formal-initial"* ]]; then
             exit 0
         fi
@@ -211,6 +221,29 @@ if [[ "$1" == "describe" ]]; then
     exit 0
 fi
 if [[ "$1" == "logs" ]]; then
+    if [[ "$*" == *"--tail=1"* ]]; then
+        probe_count=0
+        if [[ -r "$FAKE_LOG_PROBE_STATE" ]]; then
+            probe_count="$(cat "$FAKE_LOG_PROBE_STATE")"
+        fi
+        if (( probe_count < FAKE_LOG_PROBE_FAILURES )); then
+            printf '%s\n' "$(( probe_count + 1 ))" >"$FAKE_LOG_PROBE_STATE"
+            printf 'ContainerCreating\n' >&2
+            exit 1
+        fi
+        : >"$FAKE_LOG_PROBE_READY"
+    else
+        follow_count=0
+        if [[ -r "$FAKE_LOG_FOLLOW_STATE" ]]; then
+            follow_count="$(cat "$FAKE_LOG_FOLLOW_STATE")"
+        fi
+        if (( follow_count < FAKE_LOG_FOLLOW_FAILURES )); then
+            printf '%s\n' "$(( follow_count + 1 ))" >"$FAKE_LOG_FOLLOW_STATE"
+            printf 'transient log stream failure\n' >&2
+            exit 1
+        fi
+        : >"$FAKE_LOG_FOLLOW_READY"
+    fi
     printf 'application log\n'
     exit 0
 fi
@@ -236,7 +269,15 @@ exit 0
         "FAKE_DOCKER_LOG": str(docker_log),
         "FAKE_KUBECTL_LOG": str(kubectl_log),
         "FAKE_KUBECTL_STATE": str(kubectl_state),
+        "FAKE_LOG_PROBE_STATE": str(log_probe_state),
+        "FAKE_LOG_PROBE_READY": str(log_probe_ready),
+        "FAKE_LOG_PROBE_FAILURES": "0",
+        "FAKE_LOG_FOLLOW_STATE": str(log_follow_state),
+        "FAKE_LOG_FOLLOW_READY": str(log_follow_ready),
+        "FAKE_LOG_FOLLOW_FAILURES": "0",
         "FAKE_FAIL_FIRST_FORMAL": "1" if fail_first_formal else "0",
+        "TRAJWIKI_POD_START_TIMEOUT_SECONDS": "10",
+        "TRAJWIKI_POD_STATUS_INTERVAL_SECONDS": "1",
     }
     return repository, env, docker_log, kubectl_log
 
@@ -355,3 +396,66 @@ def test_kubernetes_launcher_archives_deletes_and_resumes_in_order(
         )
         assert dry_delete < initial_create < initial_delete < package_create
         assert package_create < package_delete
+
+
+def test_kubernetes_launcher_waits_for_container_logs(
+    tmp_path: Path,
+) -> None:
+    repository, env, _, _ = _launcher_fixture(
+        tmp_path,
+        fail_first_formal=False,
+    )
+    env["FAKE_LOG_PROBE_FAILURES"] = "2"
+    launcher = (
+        Path(__file__).resolve().parents[2]
+        / "scripts"
+        / "launch_rebuttal_k8s.sh"
+    )
+
+    result = subprocess.run(
+        ["bash", str(launcher), "dry-run"],
+        cwd=repository,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.count("Waiting for container start:") == 2
+    assert "Container logs available:" in result.stdout
+    assert Path(env["FAKE_LOG_PROBE_STATE"]).read_text(encoding="utf-8").strip() == "2"
+
+
+def test_kubernetes_launcher_reattaches_interrupted_log_stream(
+    tmp_path: Path,
+) -> None:
+    repository, env, _, kubectl_log = _launcher_fixture(
+        tmp_path,
+        fail_first_formal=False,
+    )
+    env["FAKE_LOG_FOLLOW_FAILURES"] = "1"
+    launcher = (
+        Path(__file__).resolve().parents[2]
+        / "scripts"
+        / "launch_rebuttal_k8s.sh"
+    )
+
+    result = subprocess.run(
+        ["bash", str(launcher), "dry-run"],
+        cwd=repository,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "Pod log stream ended with status 1 while Job is active;" in result.stdout
+    assert "Reattaching to Pod logs:" in result.stdout
+    assert any(
+        "logs -f" in line and "--since=30s" in line
+        for line in kubectl_log.read_text(encoding="utf-8").splitlines()
+    )

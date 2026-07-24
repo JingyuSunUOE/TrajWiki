@@ -802,6 +802,12 @@ Linux/amd64 image digest, then runs a GPU dry-run Job, a GPU formal Job, and a C
 Job. A failed formal Job gets at most one resume Job. Each Job's rendered YAML, status,
 logs, and `describe` output are archived before that exact Job is deleted; no
 `kubectl delete jobs --all` operation is used.
+After a Pod object appears, the launcher waits for its container to become loggable
+instead of treating `ContainerCreating` as a log failure. While waiting it reports the
+Pod phase, waiting reason, and elapsed time; an interrupted live log stream is reattached
+while the Job remains active. The default startup timeout is two hours with 15-second
+status updates. Override these with `TRAJWIKI_POD_START_TIMEOUT_SECONDS` and
+`TRAJWIKI_POD_STATUS_INTERVAL_SECONDS` when cluster scheduling or image pulls require it.
 Before building the image, the controller verifies that the 60-query parent is complete,
 has zero integrity/validation errors, contains exactly 60 sampled queries and 1,200
 provider-ledger rows, and shares the source `details.json` hash. The validated source-run,

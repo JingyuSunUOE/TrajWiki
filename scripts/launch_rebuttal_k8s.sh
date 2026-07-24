@@ -30,6 +30,17 @@ WORKFLOW_ID="${TRAJWIKI_WORKFLOW_ID:-rw$(date -u +%Y%m%d%H%M%S)}"
 WORKFLOW_DIR="$PROJECT_DIR/private/rebuttal_200/$WORKFLOW_ID"
 K8S_LOG_DIR="$WORKFLOW_DIR/kubernetes"
 BUNDLE_PATH="${TRAJWIKI_BUNDLE_PATH:-$PROJECT_DIR/verification_bundle_${WORKFLOW_ID}.tar.zst}"
+POD_START_TIMEOUT_SECONDS="${TRAJWIKI_POD_START_TIMEOUT_SECONDS:-7200}"
+POD_STATUS_INTERVAL_SECONDS="${TRAJWIKI_POD_STATUS_INTERVAL_SECONDS:-15}"
+
+if [[ ! "$POD_START_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
+    echo "TRAJWIKI_POD_START_TIMEOUT_SECONDS must be a positive integer." >&2
+    exit 2
+fi
+if [[ ! "$POD_STATUS_INTERVAL_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
+    echo "TRAJWIKI_POD_STATUS_INTERVAL_SECONDS must be a positive integer." >&2
+    exit 2
+fi
 
 mkdir -p "$K8S_LOG_DIR"
 cd "$PROJECT_DIR"
@@ -350,6 +361,65 @@ cleanup_current_job() {
 }
 trap cleanup_current_job EXIT INT TERM
 
+wait_for_container_logs() {
+    local job="$1"
+    local pod="$2"
+    local started_at=""
+    local now=""
+    local elapsed=""
+    local phase=""
+    local waiting_reason=""
+    local succeeded=""
+    local failed=""
+
+    started_at="$(date +%s)"
+    while true; do
+        if kubectl logs "$pod" -n "$NS" --tail=1 >/dev/null 2>&1; then
+            elapsed="$(( $(date +%s) - started_at ))"
+            echo "Container logs available: pod=$pod elapsed=${elapsed}s"
+            return 0
+        fi
+
+        succeeded="$(
+            kubectl get job "$job" -n "$NS" \
+                -o jsonpath='{.status.succeeded}' 2>/dev/null || true
+        )"
+        failed="$(
+            kubectl get job "$job" -n "$NS" \
+                -o jsonpath='{.status.failed}' 2>/dev/null || true
+        )"
+        if [[ "$succeeded" == "1" ]]; then
+            echo "Job completed before the live log stream became available: $job"
+            return 0
+        fi
+        if [[ -n "$failed" && "$failed" != "0" ]]; then
+            echo "Job failed before the container log stream became available: $job" >&2
+            return 1
+        fi
+
+        now="$(date +%s)"
+        elapsed="$(( now - started_at ))"
+        if (( elapsed >= POD_START_TIMEOUT_SECONDS )); then
+            echo "Timed out waiting ${POD_START_TIMEOUT_SECONDS}s for container logs: $pod" >&2
+            return 1
+        fi
+        phase="$(
+            kubectl get pod "$pod" -n "$NS" \
+                -o jsonpath='{.status.phase}' 2>/dev/null || true
+        )"
+        waiting_reason="$(
+            kubectl get pod "$pod" -n "$NS" \
+                -o jsonpath='{.status.containerStatuses[0].state.waiting.reason}' \
+                2>/dev/null || true
+        )"
+        echo \
+            "Waiting for container start: pod=$pod phase=${phase:-unknown}" \
+            "reason=${waiting_reason:-unknown} elapsed=${elapsed}s"
+        kubectl get pod "$pod" -n "$NS" -o wide || true
+        sleep "$POD_STATUS_INTERVAL_SECONDS"
+    done
+}
+
 run_job() {
     local mode="$1"
     local attempt_label="${2:-initial}"
@@ -359,6 +429,11 @@ run_job() {
     local log_path=""
     local succeeded=""
     local failed=""
+    local pod_wait_started=""
+    local now=""
+    local elapsed=""
+    local log_stream_attempt=0
+    local log_status=0
 
     render_job "$mode" >"$rendered"
     kubectl create --dry-run=client -f "$rendered" -n "$NS" -o yaml >/dev/null
@@ -368,6 +443,7 @@ run_job() {
     CURRENT_MODE="$mode"
     echo "Created Job: $job"
 
+    pod_wait_started="$(date +%s)"
     while [[ -z "$pod" ]]; do
         pod="$(
             kubectl get pods \
@@ -378,20 +454,53 @@ run_job() {
                 || true
         )"
         if [[ -z "$pod" ]]; then
+            now="$(date +%s)"
+            elapsed="$(( now - pod_wait_started ))"
+            if (( elapsed >= POD_START_TIMEOUT_SECONDS )); then
+                echo "Timed out waiting ${POD_START_TIMEOUT_SECONDS}s for a Pod: $job" >&2
+                archive_job_state "$job" "" "$mode"
+                delete_exact_job "$job"
+                CURRENT_JOB=""
+                CURRENT_POD=""
+                CURRENT_MODE=""
+                return 1
+            fi
+            echo "Waiting for Pod creation: job=$job elapsed=${elapsed}s"
             kubectl get job "$job" -n "$NS"
-            sleep 5
+            sleep "$POD_STATUS_INTERVAL_SECONDS"
         fi
     done
     CURRENT_POD="$pod"
     echo "Pod: $pod"
     kubectl get pod "$pod" -n "$NS" -o wide
 
-    log_path="$K8S_LOG_DIR/${mode}_${attempt_label}_${job}.log"
-    set +e
-    kubectl logs -f "$pod" -n "$NS" 2>&1 | tee "$log_path"
-    set -e
+    if ! wait_for_container_logs "$job" "$pod"; then
+        archive_job_state "$job" "$pod" "$mode"
+        delete_exact_job "$job"
+        CURRENT_JOB=""
+        CURRENT_POD=""
+        CURRENT_MODE=""
+        echo "Job never reached a loggable container state and was archived/deleted: $job" >&2
+        return 1
+    fi
 
+    log_path="$K8S_LOG_DIR/${mode}_${attempt_label}_${job}.log"
+    : >"$log_path"
     while true; do
+        log_stream_attempt="$(( log_stream_attempt + 1 ))"
+        if (( log_stream_attempt > 1 )); then
+            echo "Reattaching to Pod logs: pod=$pod attempt=$log_stream_attempt" \
+                | tee -a "$log_path"
+        fi
+        set +e
+        if (( log_stream_attempt == 1 )); then
+            kubectl logs -f "$pod" -n "$NS" 2>&1 | tee -a "$log_path"
+        else
+            kubectl logs -f "$pod" -n "$NS" --since=30s 2>&1 | tee -a "$log_path"
+        fi
+        log_status="${PIPESTATUS[0]}"
+        set -e
+
         succeeded="$(
             kubectl get job "$job" -n "$NS" \
                 -o jsonpath='{.status.succeeded}' 2>/dev/null || true
@@ -406,7 +515,12 @@ run_job() {
         if [[ -n "$failed" && "$failed" != "0" ]]; then
             break
         fi
-        sleep 5
+        echo \
+            "Pod log stream ended with status $log_status while Job is active;" \
+            "reconnecting in ${POD_STATUS_INTERVAL_SECONDS}s." \
+            | tee -a "$log_path"
+        kubectl get pod "$pod" -n "$NS" -o wide || true
+        sleep "$POD_STATUS_INTERVAL_SECONDS"
     done
 
     archive_job_state "$job" "$pod" "$mode"
@@ -447,22 +561,16 @@ else
     run_job package
 fi
 
-residual_jobs=()
 while IFS= read -r job; do
     if [[ -n "$job" ]]; then
-        residual_jobs+=("$job")
+        echo "Deleting residual workflow Job by exact name: $job" >&2
+        delete_exact_job "$job"
     fi
 done < <(
     kubectl get jobs -n "$NS" \
         -l "trajwiki.org/workflow=$WORKFLOW_ID" \
         -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}'
 )
-for job in "${residual_jobs[@]}"; do
-    if [[ -n "$job" ]]; then
-        echo "Deleting residual workflow Job by exact name: $job" >&2
-        delete_exact_job "$job"
-    fi
-done
 remaining="$(
     kubectl get jobs -n "$NS" \
         -l "trajwiki.org/workflow=$WORKFLOW_ID" \
