@@ -46,11 +46,11 @@ spec:
                       value: "PARENT_60_VALUE"
               resources:
                     requests:
-                        cpu: 12
+                        cpu: 6
                         memory: '128Gi'
                         nvidia.com/gpu: 1
                     limits:
-                        cpu: 12
+                        cpu: 6
                         memory: '128Gi'
                         nvidia.com/gpu: 1
               volumeMounts:
