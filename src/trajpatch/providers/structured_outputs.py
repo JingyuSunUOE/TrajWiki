@@ -10,7 +10,6 @@ from pydantic import BaseModel, Field
 
 from trajpatch.exceptions import ParserValidationError
 from trajpatch.memory.extraction_recovery import render_episodic_memory
-from trajpatch.memory.llm_text_parsers import parse_episodic_memory
 from trajpatch.memory.schemas import (
     ClaimSignalExtractionResult,
     ClaimTextExtractionResult,

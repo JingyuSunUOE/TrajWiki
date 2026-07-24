@@ -3,7 +3,15 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from trajpatch.analysis.cost_benefit import build_cost_query_rows, build_memory_scaling_rows
+from trajpatch.analysis.cost_benefit import (
+    _augment_cost_rows_with_dollars,
+    _cost_phase_summary,
+    _preferred_analysis_artifact,
+    build_cost_query_rows,
+    build_cost_reconciliation,
+    build_memory_scaling_rows,
+    compact_cost_call_row,
+)
 from trajpatch.analysis.cost_model import (
     break_even_queries,
     cost_phase_for_task,
@@ -147,6 +155,26 @@ def test_cost_phase_scope_mapping() -> None:
     assert reusable_scope_for_task("wiki_page_rerank") == "per_query"
 
 
+def test_compact_cost_call_preserves_missing_provider_usage() -> None:
+    row = compact_cost_call_row(
+        {
+            "role": "backbone",
+            "task": "answer_generation",
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "metadata": {
+                "provider_prompt_usage_available": False,
+                "provider_completion_usage_available": False,
+            },
+        }
+    )
+
+    assert row["prompt_tokens"] is None
+    assert row["completion_tokens"] is None
+    assert row["total_tokens"] is None
+    assert row["provider_usage_available"] is False
+
+
 def test_dollar_estimator_and_break_even() -> None:
     missing = estimate_dollar_cost(1000, 500, "gpt-4o-mini", None)
     assert missing["total_cost"] is None
@@ -167,11 +195,73 @@ def test_dollar_estimator_and_break_even() -> None:
         },
     )
     assert priced["total_cost"] == 0.5
+    missing_usage = estimate_dollar_cost(
+        None,
+        500,
+        "gpt-4o-mini",
+        {
+            "currency": "USD",
+            "models": {
+                "gpt-4o-mini": {
+                    "input_per_1m_tokens": 0.1,
+                    "output_per_1m_tokens": 0.2,
+                }
+            },
+        },
+    )
+    assert missing_usage["total_cost"] is None
+    assert missing_usage["price_available"] is True
+    assert missing_usage["usage_available"] is False
 
     assert break_even_queries(100, 25)["break_even_queries"] == 4
     no_saving = break_even_queries(100, 0)
     assert no_saving["break_even_queries"] is None
     assert no_saving["reason"] == "no_query_cost_saving"
+
+
+def test_cost_summary_does_not_report_partial_dollar_total() -> None:
+    price_config = {
+        "currency": "USD",
+        "models": {
+            "gpt-4o-mini": {
+                "input_per_1m_tokens": 0.1,
+                "output_per_1m_tokens": 0.2,
+            }
+        },
+    }
+    rows = _augment_cost_rows_with_dollars(
+        [
+            {
+                "cost_phase": "query_time",
+                "deployment_scope": "deployment",
+                "reusable_scope": "per_query",
+                "model": "gpt-4o-mini",
+                "prompt_tokens": 100,
+                "completion_tokens": 10,
+                "total_tokens": 110,
+                "provider_usage_available": True,
+                "latency_ms": 2.0,
+            },
+            {
+                "cost_phase": "query_time",
+                "deployment_scope": "deployment",
+                "reusable_scope": "per_query",
+                "model": "gpt-4o-mini",
+                "prompt_tokens": None,
+                "completion_tokens": None,
+                "total_tokens": None,
+                "provider_usage_available": False,
+                "latency_ms": 3.0,
+            },
+        ],
+        price_config,
+    )
+    summary = _cost_phase_summary(rows)
+
+    assert rows[1]["dollar_cost"] is None
+    assert summary[0]["provider_usage_missing_rows"] == 1
+    assert summary[0]["dollar_cost"] is None
+    assert summary[0]["dollar_total_complete"] is False
 
 
 def test_memory_scaling_and_query_cost_rows(tmp_path: Path) -> None:
@@ -206,4 +296,65 @@ def test_memory_scaling_and_query_cost_rows(tmp_path: Path) -> None:
     assert query_rows[0]["direct_candidate_universe"] == 1
     assert query_rows[0]["answer_prompt_tokens"] == 20
     assert query_rows[0]["unsupported_answer_proxy"] is False
-    assert json.loads(json.dumps(query_rows[0]))["schema_version"] == "cost_query_v1"
+    assert json.loads(json.dumps(query_rows[0]))["schema_version"] == "cost_query_v2"
+
+
+def test_cost_reconciliation_detects_duplicate_and_missing_uids() -> None:
+    raw_records = [
+        {"prompt_tokens": 10, "completion_tokens": 2},
+        {"prompt_tokens": 4, "completion_tokens": 1},
+    ]
+    compact_rows = [
+        {
+            "provider_call_uid": "run/0/backbone/call-1",
+            "call_item_uid": "run/0/backbone/call-1/0",
+            "worker_id": "0",
+            "role": "backbone",
+            "task": "answer_generation",
+            "prompt_tokens": 10,
+            "completion_tokens": 2,
+            "total_tokens": 12,
+            "latency_ms": 5.0,
+            "sample_id": "conv-1",
+            "query_task_id": "q1",
+        },
+        {
+            "provider_call_uid": "run/1/backbone/call-1",
+            "call_item_uid": "run/1/backbone/call-1/0",
+            "worker_id": "1",
+            "role": "backbone",
+            "task": "answer_generation",
+            "prompt_tokens": 4,
+            "completion_tokens": 1,
+            "total_tokens": 5,
+            "latency_ms": 2.0,
+            "sample_id": "conv-2",
+            "query_task_id": "q2",
+        },
+    ]
+
+    summary, rows = build_cost_reconciliation(raw_records, compact_rows)
+
+    assert summary["reconciled"] is True
+    assert summary["provider_call_count"] == 2
+    assert summary["duplicate_call_item_uid_count"] == 0
+    assert len(rows) == 2
+
+
+def test_cost_analysis_prefers_rebuilt_v2_artifacts(tmp_path: Path) -> None:
+    primary = tmp_path / "analysis" / "offline_ablation_rows.jsonl"
+    primary.parent.mkdir(parents=True)
+    primary.write_text("{}\n", encoding="utf-8")
+
+    assert (
+        _preferred_analysis_artifact(tmp_path, "offline_ablation_rows.jsonl") == primary
+    )
+
+    versioned = tmp_path / "analysis_v2" / "offline_ablation_rows.jsonl"
+    versioned.parent.mkdir(parents=True)
+    versioned.write_text("{}\n", encoding="utf-8")
+
+    assert (
+        _preferred_analysis_artifact(tmp_path, "offline_ablation_rows.jsonl")
+        == versioned
+    )

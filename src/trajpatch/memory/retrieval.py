@@ -25,7 +25,6 @@ from trajpatch.storage.models import (
     RawMessageRecord,
     RetrievalEvent,
     TrajectoryRecord,
-    WikiPageRecord,
 )
 from trajpatch.storage.repository import TrajWikiStore
 from trajpatch.types import NormalizedMessage, RetrievalBundle
@@ -37,7 +36,6 @@ from .facets import (
     exact_term_keyword_set,
     extract_query_facets_v1,
     facet_value_key,
-    is_list_like_query,
     normalize_entity_key,
 )
 from .historical import sanitize_historical_item_terms

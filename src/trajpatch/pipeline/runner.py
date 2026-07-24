@@ -145,6 +145,7 @@ class PipelineShardResult:
     episodic_batch_effective_size_final: int
     orchestrator_counters: dict[str, Any]
     structured_call_metadata: list[dict[str, Any]]
+    provider_call_records: list[dict[str, Any]]
     device_allocation: dict[str, Any]
 
 
@@ -317,6 +318,7 @@ class PipelineRunner:
         self.worker_shards: list[dict[str, Any]] = []
         self.worker_device_allocation: dict[str, Any] = {}
         self.worker_structured_call_metadata: list[dict[str, Any]] = []
+        self.worker_provider_call_records: list[dict[str, Any]] = []
         self.worker_database_root: str | None = None
         self.worker_database_local_scratch_used = False
         self.worker_database_paths: list[dict[str, Any]] = []
@@ -392,12 +394,20 @@ class PipelineRunner:
         event = self._json_safe(event)
         now = time.perf_counter()
         previous_stage = self._current_stage
+        previous_sample = self._current_sample_id
         previous_query = self._current_query_task_id
         self._current_stage = str(event.get("stage") or event_type)
         if event.get("sample_id") is not None:
-            self._current_sample_id = str(event.get("sample_id"))
+            next_sample = str(event.get("sample_id"))
+            self._current_sample_id = next_sample
+            if next_sample != previous_sample and event.get("query_task_id") is None:
+                self._current_query_task_id = None
         if event.get("query_task_id") is not None:
             self._current_query_task_id = str(event.get("query_task_id"))
+        self._set_meter_call_context(
+            sample_id=self._current_sample_id,
+            query_task_id=self._current_query_task_id,
+        )
         self._recent_lifecycle_events.append(event)
         self._recent_lifecycle_events = self._recent_lifecycle_events[-50:]
         if self._current_stage != previous_stage:
@@ -1054,6 +1064,7 @@ class PipelineRunner:
             self.session.close()
         self.dataset_scope_key, self.dataset_scope = self._resolve_dataset_scope()
         self.run_id = self._build_run_id()
+        self._set_meter_call_namespace(run_id=self.run_id, worker_id="main")
         self.run_dir = self.config.output_dir / self.config.dataset / self.dataset_scope_key / self.run_id
         self.run_dir.mkdir(parents=True, exist_ok=True)
         if self.config.database_path is None:
@@ -1111,6 +1122,7 @@ class PipelineRunner:
         self.worker_shards = []
         self.worker_device_allocation = {}
         self.worker_structured_call_metadata = []
+        self.worker_provider_call_records = []
         self.worker_database_root = None
         self.worker_database_local_scratch_used = False
         self.worker_database_paths = []
@@ -1154,6 +1166,7 @@ class PipelineRunner:
         self.worker_id = worker_id
         self.dataset_scope_key, self.dataset_scope = self._resolve_dataset_scope()
         self.run_id = run_id
+        self._set_meter_call_namespace(run_id=run_id, worker_id=worker_id)
         self.run_dir = run_dir
         self.config.database_path = database_path
         self.worker_database_root = str(database_root)
@@ -1543,6 +1556,7 @@ class PipelineRunner:
             )
             worker._sync_cache_lock_stats()
             structured_records = worker._structured_call_metadata()
+            provider_call_records = worker._provider_call_records()
             orchestrator_counters = worker._orchestrator_counter_snapshot()
             runtime_ms = (time.perf_counter() - started) * 1000.0
             return PipelineShardResult(
@@ -1562,6 +1576,7 @@ class PipelineRunner:
                 episodic_batch_effective_size_final=worker.episodic_batch_effective_size_final,
                 orchestrator_counters=orchestrator_counters,
                 structured_call_metadata=structured_records,
+                provider_call_records=provider_call_records,
                 device_allocation=dict(worker.device_allocation),
             )
         except Exception as exc:
@@ -1678,6 +1693,7 @@ class PipelineRunner:
         self.cache_stats = self._empty_cache_stats()
         self.memory_stage_batch_stats = {}
         self.worker_structured_call_metadata = []
+        self.worker_provider_call_records = []
         self.episodic_batch_call_count = 0
         self.episodic_batch_item_count = 0
         self.episodic_batch_repair_after_batch_count = 0
@@ -1709,6 +1725,7 @@ class PipelineRunner:
                 for key, value in stats.items():
                     target[key] = int(target.get(key, 0)) + int(value)
             self.worker_structured_call_metadata.extend(result.structured_call_metadata)
+            self.worker_provider_call_records.extend(result.provider_call_records)
         if self.orchestrator is not None:
             for field_name in ORCHESTRATOR_COUNTER_FIELDS:
                 setattr(
@@ -1753,6 +1770,34 @@ class PipelineRunner:
                 provider = provider.provider
             if isinstance(provider, MeteredLLMProvider):
                 records.extend(row.metadata for row in provider.calls if row.metadata.get("structured_requested"))
+        return records
+
+    def _provider_call_records(self) -> list[dict[str, Any]]:
+        """Return all metered calls without prompt text."""
+
+        records: list[dict[str, Any]] = []
+        for provider in (self.llm_provider, self.judge_provider):
+            if isinstance(provider, SemaphoreLimitedLLMProvider):
+                provider = provider.provider
+            if not isinstance(provider, MeteredLLMProvider):
+                continue
+            for row in provider.calls:
+                metadata = dict(row.metadata or {})
+                records.append(
+                    {
+                        "role": row.role,
+                        "task": row.task,
+                        "prompt_tokens": row.prompt_tokens,
+                        "completion_tokens": row.completion_tokens,
+                        "latency_ms": row.latency_ms,
+                        "provider_call_id": row.provider_call_id,
+                        "provider_call_uid": metadata.get("provider_call_uid"),
+                        "call_item_uid": metadata.get("call_item_uid"),
+                        "provider_call_kind": row.provider_call_kind,
+                        "logical_item_count": row.logical_item_count,
+                        "metadata": metadata,
+                    }
+                )
         return records
 
     @staticmethod
@@ -2097,6 +2142,38 @@ class PipelineRunner:
                     error_message=self._compact_error_text(exc, limit=500),
                 )
                 raise
+            pre_reflection_answer_text = str(answer_response.text or "")
+            pre_reflection_event_id = retrieval_bundle.retrieval_event_id
+            pre_reflection_answer_metadata = dict(answer_response.metadata or {})
+            first_attempt_initial_stage_metadata = {
+                key: value
+                for key, value in pre_reflection_answer_metadata.items()
+                if str(key).startswith("answer_stage_initial_")
+            }
+            pre_reflection_supporting_refs = list(
+                pre_reflection_answer_metadata.get("answer_synthesis_supporting_refs")
+                or dict(
+                    pre_reflection_answer_metadata.get("answer_synthesis_payload") or {}
+                ).get("supporting_source_refs")
+                or []
+            )
+            pre_reflection_invalid_supporting_refs = list(
+                pre_reflection_answer_metadata.get("invalid_supporting_refs") or []
+            )
+            pre_reflection_prompt_tokens = int(
+                pre_reflection_answer_metadata.get(
+                    "answer_stage_post_validation_prompt_tokens"
+                )
+                or answer_response.prompt_tokens
+                or 0
+            )
+            pre_reflection_completion_tokens = int(
+                pre_reflection_answer_metadata.get(
+                    "answer_stage_post_validation_completion_tokens"
+                )
+                or answer_response.completion_tokens
+                or 0
+            )
             retrieval_bundle, answer_prompt, answer_response, reflection_retry_metadata = (
                 self._maybe_retry_with_retrieval_reflection(
                     sample_id=sample.sample_id,
@@ -2110,6 +2187,21 @@ class PipelineRunner:
             answer_metadata = {
                 **dict(answer_response.metadata),
                 **reflection_retry_metadata,
+                **first_attempt_initial_stage_metadata,
+                "answer_stage_pre_reflection_text": pre_reflection_answer_text,
+                "answer_stage_pre_reflection_retrieval_event_id": pre_reflection_event_id,
+                "answer_stage_pre_reflection_supporting_refs": pre_reflection_supporting_refs,
+                "answer_stage_pre_reflection_invalid_supporting_refs": (
+                    pre_reflection_invalid_supporting_refs
+                ),
+                "answer_stage_pre_reflection_prompt_tokens": pre_reflection_prompt_tokens,
+                "answer_stage_pre_reflection_completion_tokens": (
+                    pre_reflection_completion_tokens
+                ),
+                "answer_stage_final_text": str(answer_response.text or ""),
+                "answer_stage_reflection_changed": (
+                    pre_reflection_answer_text.strip() != str(answer_response.text or "").strip()
+                ),
             }
             retrieval_compact_diagnostics = self._retrieval_compact_diagnostics_for_details(
                 dict(retrieval_bundle.metadata or {})
@@ -3836,6 +3928,10 @@ class PipelineRunner:
         )
 
     def _judge_single_answer(self, answer_result: AnswerResult, submitted_at: float) -> tuple[JudgeResult, float]:
+        self._set_meter_call_context(
+            sample_id=answer_result.sample_id,
+            query_task_id=answer_result.query_task_id,
+        )
         query_metadata = dict(answer_result.metadata.get("query_metadata", {}))
         if answer_result.rubric and not query_metadata.get("test_point"):
             query_metadata["test_point"] = answer_result.rubric
@@ -3862,6 +3958,10 @@ class PipelineRunner:
         return judge_result, queue_latency_ms
 
     def _compute_semantic_metrics(self, answer_result: AnswerResult) -> SemanticMetricResult:
+        self._set_meter_call_context(
+            sample_id=answer_result.sample_id,
+            query_task_id=answer_result.query_task_id,
+        )
         return self.semantic_metrics.evaluate_locomo(
             question=answer_result.question,
             reference_answer=answer_result.gold_answer or "",
@@ -4275,6 +4375,12 @@ class PipelineRunner:
                 "variant_examples": str(self.run_dir / "analysis" / "variant_examples.jsonl"),
                 "cost_call_rows": str(self.run_dir / "analysis" / "cost_call_rows.jsonl"),
                 "cost_query_rows": str(self.run_dir / "analysis" / "cost_query_rows.jsonl"),
+                "cost_reconciliation": str(
+                    self.run_dir / "analysis" / "cost_reconciliation.json"
+                ),
+                "cost_reconciliation_csv": str(
+                    self.run_dir / "analysis" / "cost_reconciliation.csv"
+                ),
                 "cost_phase_summary": str(self.run_dir / "analysis" / "cost_phase_summary.csv"),
                 "cost_quality_table": str(self.run_dir / "analysis" / "cost_quality_table.csv"),
                 "amortization_break_even": str(self.run_dir / "analysis" / "amortization_break_even.csv"),
@@ -4399,53 +4505,26 @@ class PipelineRunner:
 
     def _cost_call_records(self) -> list[dict[str, Any]]:
         records: list[dict[str, Any]] = []
-        seen_keys: set[tuple[str, str]] = set()
-        for provider in (self.llm_provider, self.judge_provider):
-            if isinstance(provider, SemaphoreLimitedLLMProvider):
-                provider = provider.provider
-            if not isinstance(provider, MeteredLLMProvider):
-                continue
-            for row in provider.calls:
-                metadata = dict(row.metadata or {})
-                key = (
-                    str(metadata.get("provider_call_id") or row.provider_call_id),
-                    str(metadata.get("batch_index") if metadata.get("batch_index") is not None else ""),
+        seen_keys: set[str] = set()
+        for index, record in enumerate(
+            [*self._provider_call_records(), *self.worker_provider_call_records]
+        ):
+            metadata = dict(record.get("metadata") or {})
+            key = str(
+                record.get("call_item_uid")
+                or metadata.get("call_item_uid")
+                or (
+                    f"legacy/{index}/"
+                    f"{record.get('role') or metadata.get('role') or ''}/"
+                    f"{record.get('provider_call_id') or metadata.get('provider_call_id') or ''}/"
+                    f"{record.get('provider_call_uid') or metadata.get('provider_call_uid') or ''}/"
+                    f"{metadata.get('batch_index')}"
                 )
-                seen_keys.add(key)
-                records.append(
-                    {
-                        "role": row.role,
-                        "task": row.task,
-                        "prompt_tokens": row.prompt_tokens,
-                        "completion_tokens": row.completion_tokens,
-                        "latency_ms": row.latency_ms,
-                        "provider_call_id": row.provider_call_id,
-                        "provider_call_kind": row.provider_call_kind,
-                        "logical_item_count": row.logical_item_count,
-                        "metadata": metadata,
-                    }
-                )
-        for metadata in self.worker_structured_call_metadata:
-            metadata = dict(metadata or {})
-            key = (
-                str(metadata.get("provider_call_id") or ""),
-                str(metadata.get("batch_index") if metadata.get("batch_index") is not None else ""),
             )
-            if key in seen_keys:
+            if not key or key in seen_keys:
                 continue
-            records.append(
-                {
-                    "role": metadata.get("role", "backbone"),
-                    "task": metadata.get("task") or metadata.get("structured_task") or "unknown",
-                    "prompt_tokens": int(metadata.get("prompt_tokens") or 0),
-                    "completion_tokens": int(metadata.get("completion_tokens") or 0),
-                    "latency_ms": float(metadata.get("latency_ms") or 0.0),
-                    "provider_call_id": metadata.get("provider_call_id"),
-                    "provider_call_kind": metadata.get("provider_call_kind"),
-                    "logical_item_count": int(metadata.get("logical_item_count") or 1),
-                    "metadata": metadata,
-                }
-            )
+            seen_keys.add(key)
+            records.append(dict(record))
         return records
 
     def _write_cost_diagnostic_artifacts(self, evaluated_rows: list[dict[str, Any]]) -> None:
@@ -4558,6 +4637,12 @@ class PipelineRunner:
                 "variant_examples": str(self.run_dir / "analysis" / "variant_examples.jsonl"),
                 "cost_call_rows": str(self.run_dir / "analysis" / "cost_call_rows.jsonl"),
                 "cost_query_rows": str(self.run_dir / "analysis" / "cost_query_rows.jsonl"),
+                "cost_reconciliation": str(
+                    self.run_dir / "analysis" / "cost_reconciliation.json"
+                ),
+                "cost_reconciliation_csv": str(
+                    self.run_dir / "analysis" / "cost_reconciliation.csv"
+                ),
                 "cost_phase_summary": str(self.run_dir / "analysis" / "cost_phase_summary.csv"),
                 "cost_quality_table": str(self.run_dir / "analysis" / "cost_quality_table.csv"),
                 "amortization_break_even": str(self.run_dir / "analysis" / "amortization_break_even.csv"),
@@ -5426,7 +5511,6 @@ class PipelineRunner:
                 completion_tokens=int(costs.get("completion_tokens", 0)),
                 total_tokens=int(costs.get("total_tokens", 0)),
             )
-        overall_costs = dict(overall.get("costs", {}))
         add_metric_rows(
             group_level="overall",
             metrics=dict(overall["metrics"]),
@@ -5481,6 +5565,33 @@ class PipelineRunner:
         if isinstance(provider, MeteredLLMProvider):
             return provider
         return MeteredLLMProvider(provider, role=role)
+
+    def _set_meter_call_namespace(
+        self,
+        *,
+        run_id: str,
+        worker_id: str | int,
+    ) -> None:
+        for provider in (self.llm_provider, self.judge_provider):
+            if isinstance(provider, SemaphoreLimitedLLMProvider):
+                provider = provider.provider
+            if isinstance(provider, MeteredLLMProvider):
+                provider.set_call_namespace(run_id=run_id, worker_id=worker_id)
+
+    def _set_meter_call_context(
+        self,
+        *,
+        sample_id: str | None,
+        query_task_id: str | None,
+    ) -> None:
+        for provider in (self.llm_provider, self.judge_provider):
+            if isinstance(provider, SemaphoreLimitedLLMProvider):
+                provider = provider.provider
+            if isinstance(provider, MeteredLLMProvider):
+                provider.set_call_context(
+                    sample_id=sample_id,
+                    query_task_id=query_task_id,
+                )
 
     @staticmethod
     def _empty_cache_stats() -> dict[str, float]:

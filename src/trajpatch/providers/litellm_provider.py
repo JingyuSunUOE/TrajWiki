@@ -149,7 +149,19 @@ class LiteLLMProvider(LLMProvider):
         from litellm import completion
 
         formatted = self._format_messages(messages, system_prompt)
-        response = completion(model=self.model_name, messages=formatted)
+        request_metadata = dict(metadata or {})
+        generation_temperature = request_metadata.get("generation_temperature")
+        generation_seed = request_metadata.get("generation_seed")
+        generation_max_tokens = request_metadata.get("generation_max_tokens")
+        request_kwargs: dict[str, Any] = {}
+        if generation_temperature is not None:
+            request_kwargs["temperature"] = float(generation_temperature)
+        if generation_seed is not None:
+            request_kwargs["seed"] = int(generation_seed)
+            request_kwargs["drop_params"] = True
+        if generation_max_tokens is not None:
+            request_kwargs["max_tokens"] = int(generation_max_tokens)
+        response = completion(model=self.model_name, messages=formatted, **request_kwargs)
         choice = _get_value(response, "choices", default=[{}])[0]
         content = _get_value(choice, "message", "content", default="")
         usage = _get_value(response, "usage", default={}) or {}
@@ -158,7 +170,17 @@ class LiteLLMProvider(LLMProvider):
             raw=response,
             prompt_tokens=_get_value(usage, "prompt_tokens"),
             completion_tokens=_get_value(usage, "completion_tokens"),
-            metadata={"structured_vendor": self.vendor},
+            metadata={
+                "structured_vendor": self.vendor,
+                "requested_model": self.model_name,
+                "resolved_model": _get_value(response, "model") or self.model_name,
+                "provider_request_id": _get_value(response, "id"),
+                "system_fingerprint": _get_value(response, "system_fingerprint"),
+                "finish_reason": _get_value(choice, "finish_reason"),
+                "generation_temperature_requested": generation_temperature,
+                "generation_seed_requested": generation_seed,
+                "generation_max_tokens_requested": generation_max_tokens,
+            },
         )
 
     def supports_structured(self, task: str) -> bool:

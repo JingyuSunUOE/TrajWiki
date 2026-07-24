@@ -134,7 +134,7 @@ def test_auditability_artifacts_are_generated_from_mock_locomo_run(tmp_path: Pat
     ]
     packet_rows = [json.loads(line) for line in packet_path.read_text(encoding="utf-8").splitlines() if line]
     assert support_rows
-    assert packet_rows[0]["schema_version"] == "audit_packet_v1"
+    assert packet_rows[0]["schema_version"] == "audit_packet_v2"
 
     analyze_offline_ablation(
         run_dir,
@@ -153,6 +153,7 @@ def test_auditability_artifacts_are_generated_from_mock_locomo_run(tmp_path: Pat
         "failure_localization_table_path",
         "conflict_obsolete_table_path",
         "audit_packet_cost_path",
+        "error_propagation_funnel_path",
     ]:
         assert Path(generated[key]).exists()
 
@@ -218,13 +219,36 @@ def test_parallel_locomo_diagnostics_do_not_duplicate_or_conflict(tmp_path: Path
     assert len({row["query_task_id"] for row in cost_query_rows}) == expected_queries
     assert len({row["query_task_id"] for row in audit_packet_rows}) == expected_queries
     assert {row["query_task_id"] for row in support_rows} == {row["query_task_id"] for row in gold_rows}
+    assert all(row["contains_sensitive_text"] is True for row in gold_rows)
+    assert all(row["contains_sensitive_text"] is True for row in audit_packet_rows)
+    assert all(row["contains_sensitive_text"] is True for row in support_rows)
 
     cost_call_rows = _jsonl_rows(run_dir / "analysis" / "cost_call_rows.jsonl")
-    provider_call_ids = [
-        row["provider_call_id"] for row in cost_call_rows if str(row.get("provider_call_id") or "").strip()
+    call_item_uids = [
+        row["call_item_uid"]
+        for row in cost_call_rows
+        if str(row.get("call_item_uid") or "").strip()
     ]
-    assert provider_call_ids
-    assert len(provider_call_ids) == len(set(provider_call_ids))
+    assert call_item_uids
+    assert len(call_item_uids) == len(set(call_item_uids))
+    expected_sample_by_query = {
+        str(row["query_task_id"]): str(row["sample_id"]) for row in gold_rows
+    }
+    attributed_query_rows = [
+        row for row in cost_call_rows if str(row.get("query_task_id") or "").strip()
+    ]
+    assert attributed_query_rows
+    assert all(
+        str(row.get("sample_id") or "")
+        == expected_sample_by_query[str(row["query_task_id"])]
+        for row in attributed_query_rows
+    )
+    reconciliation = json.loads(
+        (run_dir / "analysis" / "cost_reconciliation.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert reconciliation["reconciled"] is True
 
     analyze_offline_ablation(
         run_dir,
@@ -237,6 +261,11 @@ def test_parallel_locomo_diagnostics_do_not_duplicate_or_conflict(tmp_path: Path
         baselines="trajwiki_observed,full_context_proxy,no_wiki_direct",
         future_query_counts="1,2",
     )
+    packet_path = run_dir / "analysis" / "audit_packet_rows.jsonl"
+    packet_path.write_text(
+        json.dumps(audit_packet_rows[0]) + "\n",
+        encoding="utf-8",
+    )
     audit_report = analyze_auditability(
         run_dir,
         baselines="trajwiki_observed,full_context_proxy,no_wiki_direct",
@@ -245,6 +274,8 @@ def test_parallel_locomo_diagnostics_do_not_duplicate_or_conflict(tmp_path: Path
 
     assert Path(cost_report["quality_table_path"]).exists()
     assert Path(audit_report["source_support_table_path"]).exists()
+    assert Path(audit_report["error_propagation_funnel_path"]).exists()
+    assert len(_jsonl_rows(packet_path)) == expected_queries
     assert failure_report["totals"]["total_queries"] == expected_queries
 
 

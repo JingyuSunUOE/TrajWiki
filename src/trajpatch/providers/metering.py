@@ -4,12 +4,19 @@ from __future__ import annotations
 
 import time
 from collections import Counter
+from contextvars import ContextVar
 from dataclasses import dataclass
 from itertools import count
 from threading import Lock
 from typing import Any
 
-from trajpatch.types import LLMResponse, ModelInfo, NormalizedMessage, StructuredLLMResponse, StructuredTaskSpec
+from trajpatch.types import (
+    LLMResponse,
+    ModelInfo,
+    NormalizedMessage,
+    StructuredLLMResponse,
+    StructuredTaskSpec,
+)
 
 from .base import LLMProvider
 
@@ -37,6 +44,19 @@ def _exception_metadata(exc: BaseException) -> dict[str, Any]:
         if request_id is not None and "request_id" not in metadata:
             metadata["request_id"] = str(request_id)
     return metadata
+
+
+def _usage_availability(
+    prompt_tokens: int | None,
+    completion_tokens: int | None,
+) -> dict[str, bool]:
+    prompt_available = prompt_tokens is not None
+    completion_available = completion_tokens is not None
+    return {
+        "provider_prompt_usage_available": prompt_available,
+        "provider_completion_usage_available": completion_available,
+        "provider_usage_available": prompt_available and completion_available,
+    }
 
 
 @dataclass(slots=True)
@@ -170,7 +190,13 @@ def summarize_llm_calls(records: list[dict[str, Any]]) -> dict[str, Any]:
 
     def add_to_group(summary: dict[str, Any], record: dict[str, Any], metadata: dict[str, Any]) -> None:
         task = str(record.get("task") or metadata.get("task") or "unknown")
-        provider_call_id = str(metadata.get("provider_call_id") or record.get("provider_call_id") or "")
+        provider_call_id = str(
+            metadata.get("provider_call_uid")
+            or record.get("provider_call_uid")
+            or metadata.get("provider_call_id")
+            or record.get("provider_call_id")
+            or ""
+        )
         provider_call_kind = str(
             metadata.get("provider_call_kind") or record.get("provider_call_kind") or "generate"
         )
@@ -219,7 +245,11 @@ def summarize_llm_calls(records: list[dict[str, Any]]) -> dict[str, Any]:
         role = str(record.get("role") or metadata.get("role") or "unknown")
         phase = str(metadata.get("phase") or phase_for_task(task))
         provider_call_id = str(
-            metadata.get("provider_call_id") or record.get("provider_call_id") or f"legacy-{index}"
+            metadata.get("provider_call_uid")
+            or record.get("provider_call_uid")
+            or metadata.get("provider_call_id")
+            or record.get("provider_call_id")
+            or f"legacy-{index}"
         )
         provider_call_kind = str(
             metadata.get("provider_call_kind") or record.get("provider_call_kind") or "generate"
@@ -285,12 +315,72 @@ def summarize_llm_calls(records: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 class MeteredLLMProvider(LLMProvider):
-    def __init__(self, provider: LLMProvider, *, role: str) -> None:
+    def __init__(
+        self,
+        provider: LLMProvider,
+        *,
+        role: str,
+        run_id: str = "unbound",
+        worker_id: str | int = "main",
+    ) -> None:
         self.provider = provider
         self.role = role
         self.calls: list[MeteredCall] = []
         self._lock = Lock()
         self._call_counter = count(1)
+        self._run_id = str(run_id or "unbound")
+        self._worker_id = str(worker_id if worker_id is not None else "main")
+        self._call_context: ContextVar[dict[str, Any] | None] = ContextVar(
+            f"trajwiki_meter_context_{id(self)}",
+            default=None,
+        )
+
+    def set_call_namespace(
+        self,
+        *,
+        run_id: str,
+        worker_id: str | int | None = None,
+    ) -> None:
+        """Set the run/worker namespace used by subsequently metered calls."""
+
+        with self._lock:
+            self._run_id = str(run_id or "unbound")
+            self._worker_id = str(worker_id if worker_id is not None else "main")
+
+    def calls_snapshot(self) -> list[MeteredCall]:
+        """Return a stable copy for concurrent artifact aggregation."""
+
+        with self._lock:
+            return list(self.calls)
+
+    def _call_identity(self, provider_call_id: str, *, batch_index: int | None) -> dict[str, str]:
+        with self._lock:
+            run_id = self._run_id
+            worker_id = self._worker_id
+        provider_call_uid = f"{run_id}/{worker_id}/{self.role}/{provider_call_id}"
+        item_suffix = str(batch_index) if batch_index is not None else "batch"
+        return {
+            "run_id": run_id,
+            "worker_id": worker_id,
+            "provider_call_uid": provider_call_uid,
+            "call_item_uid": f"{provider_call_uid}/{item_suffix}",
+        }
+
+    def set_call_context(
+        self,
+        *,
+        sample_id: str | None,
+        query_task_id: str | None,
+    ) -> None:
+        context: dict[str, Any] = {}
+        if sample_id:
+            context["sample_id"] = str(sample_id)
+        if query_task_id:
+            context["query_task_id"] = str(query_task_id)
+        self._call_context.set(context)
+
+    def _effective_metadata(self, metadata: dict[str, Any] | None) -> dict[str, Any]:
+        return {**dict(self._call_context.get() or {}), **dict(metadata or {})}
 
     def _next_provider_call_id(self, kind: str) -> str:
         with self._lock:
@@ -303,6 +393,7 @@ class MeteredLLMProvider(LLMProvider):
         system_prompt: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> LLMResponse:
+        metadata = self._effective_metadata(metadata)
         started_at = time.perf_counter()
         provider_call_id = self._next_provider_call_id("generate")
         prompt_text = "\n".join(message.content for message in messages)
@@ -320,6 +411,8 @@ class MeteredLLMProvider(LLMProvider):
                 "logical_item_count": 1,
                 "batch_size": 1,
                 "batch_index": 0,
+                **self._call_identity(provider_call_id, batch_index=0),
+                **_usage_availability(None, None),
                 **_exception_metadata(exc),
             }
             with self._lock:
@@ -352,6 +445,11 @@ class MeteredLLMProvider(LLMProvider):
             "logical_item_count": 1,
             "batch_size": 1,
             "batch_index": 0,
+            **self._call_identity(provider_call_id, batch_index=0),
+            **_usage_availability(
+                response.prompt_tokens,
+                response.completion_tokens,
+            ),
         }
         with self._lock:
             self.calls.append(
@@ -376,6 +474,11 @@ class MeteredLLMProvider(LLMProvider):
             "provider_call_id": provider_call_id,
             "provider_call_kind": "generate",
             "logical_item_count": 1,
+            **self._call_identity(provider_call_id, batch_index=0),
+            **_usage_availability(
+                response.prompt_tokens,
+                response.completion_tokens,
+            ),
         }
         return response
 
@@ -386,6 +489,7 @@ class MeteredLLMProvider(LLMProvider):
         system_prompt: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> list[LLMResponse]:
+        metadata = self._effective_metadata(metadata)
         started_at = time.perf_counter()
         provider_call_id = self._next_provider_call_id("generate_batch")
         batch_size = len(batch_messages)
@@ -415,6 +519,8 @@ class MeteredLLMProvider(LLMProvider):
                 "batched": True,
                 "batch_size": batch_size,
                 "batch_index": None,
+                **self._call_identity(provider_call_id, batch_index=None),
+                **_usage_availability(None, None),
                 **_exception_metadata(exc),
             }
             with self._lock:
@@ -451,6 +557,11 @@ class MeteredLLMProvider(LLMProvider):
                 "batched": True,
                 "batch_size": batch_size,
                 "batch_index": index,
+                **self._call_identity(provider_call_id, batch_index=index),
+                **_usage_availability(
+                    response.prompt_tokens,
+                    response.completion_tokens,
+                ),
             }
             with self._lock:
                 self.calls.append(
@@ -479,6 +590,11 @@ class MeteredLLMProvider(LLMProvider):
                 "provider_call_id": provider_call_id,
                 "provider_call_kind": "generate_batch",
                 "logical_item_count": batch_size,
+                **self._call_identity(provider_call_id, batch_index=index),
+                **_usage_availability(
+                    response.prompt_tokens,
+                    response.completion_tokens,
+                ),
             }
         return responses
 
@@ -493,6 +609,7 @@ class MeteredLLMProvider(LLMProvider):
         system_prompt: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> StructuredLLMResponse:
+        metadata = self._effective_metadata(metadata)
         started_at = time.perf_counter()
         provider_call_id = self._next_provider_call_id("generate_structured")
         prompt_text = "\n".join(message.content for message in messages)
@@ -519,6 +636,8 @@ class MeteredLLMProvider(LLMProvider):
                 "structured_supported": True,
                 "structured_success": False,
                 "structured_failure": True,
+                **self._call_identity(provider_call_id, batch_index=0),
+                **_usage_availability(None, None),
                 **_exception_metadata(exc),
             }
             with self._lock:
@@ -555,6 +674,11 @@ class MeteredLLMProvider(LLMProvider):
             "structured_supported": True,
             "structured_success": True,
             "structured_failure": False,
+            **self._call_identity(provider_call_id, batch_index=0),
+            **_usage_availability(
+                response.prompt_tokens,
+                response.completion_tokens,
+            ),
         }
         with self._lock:
             self.calls.append(
@@ -579,6 +703,11 @@ class MeteredLLMProvider(LLMProvider):
             "provider_call_id": provider_call_id,
             "provider_call_kind": "generate_structured",
             "logical_item_count": 1,
+            **self._call_identity(provider_call_id, batch_index=0),
+            **_usage_availability(
+                response.prompt_tokens,
+                response.completion_tokens,
+            ),
         }
         return response
 
@@ -650,8 +779,15 @@ class MeteredLLMProvider(LLMProvider):
             "task",
             "provider_model",
             "provider_call_id",
+            "provider_call_uid",
+            "call_item_uid",
             "provider_call_kind",
             "logical_item_count",
+            "provider_prompt_usage_available",
+            "provider_completion_usage_available",
+            "provider_usage_available",
+            "run_id",
+            "worker_id",
             "batch_size",
             "batch_index",
             "batched",

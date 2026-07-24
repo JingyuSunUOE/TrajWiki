@@ -135,10 +135,25 @@ class OpenAICompatibleProvider(LLMProvider):
         metadata: dict[str, Any] | None = None,
     ) -> LLMResponse:
         client = self._get_client()
+        request_metadata = dict(metadata or {})
+        generation_temperature = request_metadata.get("generation_temperature")
+        generation_seed = request_metadata.get("generation_seed")
+        generation_max_tokens = request_metadata.get("generation_max_tokens")
+        request_kwargs: dict[str, Any] = {
+            "model": self.model_name,
+            "messages": self._format_messages(messages, system_prompt),
+            "temperature": (
+                float(generation_temperature)
+                if generation_temperature is not None
+                else 0
+            ),
+        }
+        if generation_seed is not None:
+            request_kwargs["seed"] = int(generation_seed)
+        if generation_max_tokens is not None:
+            request_kwargs["max_tokens"] = int(generation_max_tokens)
         response = client.chat.completions.create(
-            model=self.model_name,
-            messages=self._format_messages(messages, system_prompt),
-            temperature=0,
+            **request_kwargs,
         )
         choice = _get_value(response, "choices", default=[{}])[0]
         content = _get_value(choice, "message", "content", default="")
@@ -148,7 +163,17 @@ class OpenAICompatibleProvider(LLMProvider):
             raw=response,
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
-            metadata=self._base_metadata(),
+            metadata={
+                **self._base_metadata(),
+                "requested_model": self.model_name,
+                "resolved_model": _get_value(response, "model") or self.model_name,
+                "provider_request_id": _get_value(response, "id"),
+                "system_fingerprint": _get_value(response, "system_fingerprint"),
+                "finish_reason": _get_value(choice, "finish_reason"),
+                "generation_temperature_requested": generation_temperature,
+                "generation_seed_requested": generation_seed,
+                "generation_max_tokens_requested": generation_max_tokens,
+            },
         )
 
     def supports_structured(self, task: str) -> bool:

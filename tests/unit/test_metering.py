@@ -68,7 +68,12 @@ def test_metered_generate_records_provider_failure() -> None:
 
 
 def test_metered_generate_batch_shares_provider_call_id() -> None:
-    provider = MeteredLLMProvider(_BatchProvider(), role="backbone")
+    provider = MeteredLLMProvider(
+        _BatchProvider(),
+        role="backbone",
+        run_id="run-1",
+        worker_id=3,
+    )
 
     provider.generate_batch(
         [
@@ -81,6 +86,8 @@ def test_metered_generate_batch_shares_provider_call_id() -> None:
     )
     usage = provider.diff(0)
     provider_call_ids = {record["metadata"]["provider_call_id"] for record in usage["records"]}
+    provider_call_uids = {record["metadata"]["provider_call_uid"] for record in usage["records"]}
+    call_item_uids = {record["metadata"]["call_item_uid"] for record in usage["records"]}
 
     assert usage["provider_call_count"] == 1
     assert usage["logical_call_count"] == 4
@@ -88,6 +95,31 @@ def test_metered_generate_batch_shares_provider_call_id() -> None:
     assert usage["batch_item_count"] == 4
     assert usage["avg_batch_size"] == 4
     assert len(provider_call_ids) == 1
+    assert provider_call_uids == {"run-1/3/backbone/backbone-generate_batch-000001"}
+    assert len(call_item_uids) == 4
+
+
+def test_metered_call_uids_do_not_collide_across_workers() -> None:
+    first = MeteredLLMProvider(
+        _BatchProvider(),
+        role="backbone",
+        run_id="run-1",
+        worker_id=0,
+    )
+    second = MeteredLLMProvider(
+        _BatchProvider(),
+        role="backbone",
+        run_id="run-1",
+        worker_id=1,
+    )
+    message = [NormalizedMessage(role="user", content="hello", turn_index=0)]
+
+    first.generate(message, metadata={"task": "answer_generation"})
+    second.generate(message, metadata={"task": "answer_generation"})
+
+    first_uid = first.diff(0)["records"][0]["metadata"]["provider_call_uid"]
+    second_uid = second.diff(0)["records"][0]["metadata"]["provider_call_uid"]
+    assert first_uid != second_uid
 
 
 def test_metered_generate_batch_records_one_provider_failure_for_batch() -> None:

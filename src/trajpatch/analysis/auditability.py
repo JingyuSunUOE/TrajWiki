@@ -6,9 +6,10 @@ import csv
 import json
 import sqlite3
 from collections import Counter, defaultdict
+from collections.abc import Iterable
 from pathlib import Path
 from statistics import mean, median
-from typing import Any, Iterable
+from typing import Any
 
 from trajpatch.analysis.context_cost import TOKEN_ESTIMATOR_NAME, estimate_context_tokens
 from trajpatch.analysis.gold_labels import (
@@ -17,6 +18,16 @@ from trajpatch.analysis.gold_labels import (
     load_details_rows,
     load_json_field,
     load_or_build_gold_labels,
+)
+from trajpatch.analysis.memory_index import (
+    source_message_ids_for_refs,
+    versioned_analysis_path,
+)
+from trajpatch.analysis.query_scope import (
+    filter_query_rows,
+    load_query_scope,
+    scoped_analysis_dir,
+    validate_scope_against_rows,
 )
 from trajpatch.utils.json_utils import append_jsonl, write_json
 
@@ -51,6 +62,18 @@ def parse_str_list(value: str | Iterable[str] | None, default: list[str]) -> lis
 
 def _safe_rate(numerator: int, denominator: int) -> float | None:
     return float(numerator) / float(denominator) if denominator else None
+
+
+def _gold_ref_coverage(
+    gold_refs: Iterable[str],
+    candidate_refs: set[str],
+) -> float | None:
+    gold_ref_set = set(gold_refs)
+    return (
+        len(gold_ref_set & candidate_refs) / len(gold_ref_set)
+        if gold_ref_set
+        else None
+    )
 
 
 def _safe_mean(values: Iterable[float | int | None]) -> float | None:
@@ -195,15 +218,13 @@ def invalid_refs_from_answer_metadata(answer_metadata: dict[str, Any]) -> list[s
 def _source_message_ids_for_refs(
     refs: Iterable[str],
     memory_index: dict[str, Any],
+    *,
+    sample_id: str,
 ) -> list[str]:
-    raw_message_ids_by_ref = memory_index.get("raw_message_ids_by_ref", {})
-    return sorted(
-        {
-            str(message_id)
-            for ref in refs
-            for message_id in raw_message_ids_by_ref.get(str(ref), set())
-            if str(message_id).strip()
-        }
+    return source_message_ids_for_refs(
+        memory_index,
+        sample_id=sample_id,
+        source_refs=refs,
     )
 
 
@@ -252,6 +273,7 @@ def build_answer_support_rows(
         rows.append(
             {
                 "schema_version": "answer_support_item_v1",
+                "contains_sensitive_text": True,
                 "sample_id": sample_id,
                 "query_task_id": query_task_id,
                 "item_id": f"{query_task_id}:final_answer",
@@ -259,7 +281,11 @@ def build_answer_support_rows(
                 "item_text_preview": _compact_text(sample_row.get("answer_text")),
                 "support_origin": "answer_metadata",
                 "source_refs": support_refs,
-                "source_message_ids": _source_message_ids_for_refs(support_refs, memory_index),
+                "source_message_ids": _source_message_ids_for_refs(
+                    support_refs,
+                    memory_index,
+                    sample_id=sample_id,
+                ),
                 "invalid_supporting_refs": invalid_refs,
                 "support_status": final_status,
                 "answer_postcheck_issue": issue,
@@ -275,6 +301,7 @@ def build_answer_support_rows(
                 rows.append(
                     {
                         "schema_version": "answer_support_item_v1",
+                        "contains_sensitive_text": True,
                         "sample_id": sample_id,
                         "query_task_id": query_task_id,
                         "item_id": f"{query_task_id}:{kind}:{_compact_text(item_text, limit=48)}",
@@ -282,7 +309,11 @@ def build_answer_support_rows(
                         "item_text_preview": _compact_text(item_text),
                         "support_origin": key,
                         "source_refs": refs,
-                        "source_message_ids": _source_message_ids_for_refs(refs, memory_index),
+                        "source_message_ids": _source_message_ids_for_refs(
+                            refs,
+                            memory_index,
+                            sample_id=sample_id,
+                        ),
                         "invalid_supporting_refs": [],
                         "support_status": "supported" if refs else "no_visible_source",
                         "answer_postcheck_issue": issue,
@@ -294,6 +325,7 @@ def build_answer_support_rows(
             rows.append(
                 {
                     "schema_version": "answer_support_item_v1",
+                    "contains_sensitive_text": True,
                     "sample_id": sample_id,
                     "query_task_id": query_task_id,
                     "item_id": f"{query_task_id}:bridge_finalization",
@@ -301,7 +333,11 @@ def build_answer_support_rows(
                     "item_text_preview": _compact_text(answer_metadata.get("bridge_finalization_target")),
                     "support_origin": "bridge_finalization_source_refs",
                     "source_refs": bridge_refs,
-                    "source_message_ids": _source_message_ids_for_refs(bridge_refs, memory_index),
+                    "source_message_ids": _source_message_ids_for_refs(
+                        bridge_refs,
+                        memory_index,
+                        sample_id=sample_id,
+                    ),
                     "invalid_supporting_refs": [],
                     "support_status": "supported" if bridge_refs else "no_visible_source",
                     "answer_postcheck_issue": issue,
@@ -313,6 +349,7 @@ def build_answer_support_rows(
             rows.append(
                 {
                     "schema_version": "answer_support_item_v1",
+                    "contains_sensitive_text": True,
                     "sample_id": sample_id,
                     "query_task_id": query_task_id,
                     "item_id": f"{query_task_id}:temporal_alignment",
@@ -323,7 +360,11 @@ def build_answer_support_rows(
                     ),
                     "support_origin": "answer_temporal_selected_source_ref",
                     "source_refs": temporal_ref,
-                    "source_message_ids": _source_message_ids_for_refs(temporal_ref, memory_index),
+                    "source_message_ids": _source_message_ids_for_refs(
+                        temporal_ref,
+                        memory_index,
+                        sample_id=sample_id,
+                    ),
                     "invalid_supporting_refs": [],
                     "support_status": "supported",
                     "answer_postcheck_issue": issue,
@@ -336,6 +377,7 @@ def build_answer_support_rows(
             rows.append(
                 {
                     "schema_version": "answer_support_item_v1",
+                    "contains_sensitive_text": True,
                     "sample_id": sample_id,
                     "query_task_id": query_task_id,
                     "item_id": f"{query_task_id}:counted_event:{index}",
@@ -343,7 +385,11 @@ def build_answer_support_rows(
                     "item_text_preview": _compact_text(text),
                     "support_origin": "answer_synthesis_counted_events",
                     "source_refs": refs,
-                    "source_message_ids": _source_message_ids_for_refs(refs, memory_index),
+                    "source_message_ids": _source_message_ids_for_refs(
+                        refs,
+                        memory_index,
+                        sample_id=sample_id,
+                    ),
                     "invalid_supporting_refs": [],
                     "support_status": "supported" if refs else "no_visible_source",
                     "answer_postcheck_issue": issue,
@@ -427,6 +473,7 @@ def build_answer_context_claim_rows(
                 rows.append(
                     {
                         "schema_version": "answer_context_claim_v1",
+                        "contains_sensitive_text": True,
                         "sample_id": str(sample_row.get("sample_id") or ""),
                         "query_task_id": query_task_id,
                         "retrieval_event_id": event.get("id"),
@@ -473,6 +520,7 @@ def build_claim_lifecycle_rows(database_path: Path, memory_index: dict[str, Any]
             rows.append(
                 {
                     "schema_version": "claim_lifecycle_v1",
+                    "contains_sensitive_text": True,
                     "sample_id": str(row["sample_id"] or ""),
                     "snapshot_id": str(row["snapshot_id"] or ""),
                     "trajectory_id": str(row["trajectory_id"] or ""),
@@ -595,6 +643,56 @@ def build_auditability_rows(
         retrieved_refs = _dedupe_str(sample_row.get("retrieval_source_refs") or event.get("source_refs") or [])
         support_gold_overlap = sorted(set(support_refs) & set(gold_refs))
         retrieved_gold_overlap = sorted(set(retrieved_refs) & set(gold_refs))
+        sample_id = str(sample_row.get("sample_id") or "")
+        sample_raw_refs = {
+            str(message.get("source_ref") or "")
+            for message in memory_index.get("sample_raw_messages", {}).get(
+                sample_id,
+                [],
+            )
+            if str(message.get("source_ref") or "").strip()
+        }
+        sample_trajectory_ids = set(
+            memory_index.get("sample_to_trajectories", {}).get(sample_id, set())
+        )
+        trajectory_linked_refs = set().union(
+            *(
+                memory_index.get("trajectory_refs", {}).get(trajectory_id, set())
+                for trajectory_id in sample_trajectory_ids
+            )
+        )
+        routed_trajectory_ids = {
+            str(trajectory_id)
+            for page_id in list(event.get("page_ids") or [])
+            for trajectory_id in memory_index.get("page_to_trajectory_ids", {}).get(
+                str(page_id),
+                [],
+            )
+        }
+        page_routed_refs = set().union(
+            *(
+                memory_index.get("trajectory_refs", {}).get(
+                    trajectory_id,
+                    set(),
+                )
+                for trajectory_id in routed_trajectory_ids
+            )
+        )
+        selected_trajectory_refs = set().union(
+            *(
+                memory_index.get("trajectory_refs", {}).get(
+                    str(trajectory_id),
+                    set(),
+                )
+                for trajectory_id in list(event.get("trajectory_ids") or [])
+            )
+        )
+        expanded_refs = {
+            str(ref)
+            for ref in list(event.get("expanded_refs") or [])
+            if str(ref).strip()
+        }
+
         answer_text = str(sample_row.get("answer_text") or "")
         answer_abstained = _is_abstention(answer_text)
         issue = _answer_issue(answer_metadata)
@@ -679,8 +777,8 @@ def build_auditability_rows(
         )
         rows.append(
             {
-                "schema_version": "auditability_row_v1",
-                "sample_id": str(sample_row.get("sample_id") or ""),
+                "schema_version": "auditability_row_v2",
+                "sample_id": sample_id,
                 "query_task_id": query_task_id,
                 "judge_verdict": sample_row.get("judge_verdict"),
                 "observed_answer_available": observed_answer_available,
@@ -692,6 +790,26 @@ def build_auditability_rows(
                 "support_gold_ref_overlap_count": len(support_gold_overlap),
                 "support_gold_ref_coverage": _safe_rate(len(support_gold_overlap), len(gold_refs)),
                 "retrieved_gold_ref_coverage": _safe_rate(len(retrieved_gold_overlap), len(gold_refs)),
+                "stored_gold_ref_coverage": _gold_ref_coverage(
+                    gold_refs,
+                    sample_raw_refs,
+                ),
+                "trajectory_linked_gold_ref_coverage": _gold_ref_coverage(
+                    gold_refs,
+                    trajectory_linked_refs,
+                ),
+                "page_routed_gold_ref_coverage": _gold_ref_coverage(
+                    gold_refs,
+                    page_routed_refs,
+                ),
+                "trajectory_selected_gold_ref_coverage": _gold_ref_coverage(
+                    gold_refs,
+                    selected_trajectory_refs,
+                ),
+                "snapshot_expanded_gold_ref_coverage": _gold_ref_coverage(
+                    gold_refs,
+                    expanded_refs,
+                ),
                 "source_supported_proxy": source_supported_proxy,
                 "unsupported_answer_risk": unsupported_answer_risk,
                 "unsupported_reason": unsupported_reason,
@@ -715,6 +833,59 @@ def build_auditability_rows(
             }
         )
     return rows
+
+
+def _error_propagation_funnel_rows(
+    audit_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    stage_fields = [
+        ("source_stored", "stored_gold_ref_coverage"),
+        ("linked_to_trajectory", "trajectory_linked_gold_ref_coverage"),
+        ("reachable_from_selected_pages", "page_routed_gold_ref_coverage"),
+        ("trajectory_selected", "trajectory_selected_gold_ref_coverage"),
+        ("snapshot_expanded", "snapshot_expanded_gold_ref_coverage"),
+        ("source_in_final_context", "retrieved_gold_ref_coverage"),
+        ("used_in_final_support", "support_gold_ref_coverage"),
+    ]
+    eligible = [row for row in audit_rows if list(row.get("gold_source_refs") or [])]
+
+    def observed_correct(row: dict[str, Any]) -> bool:
+        verdict = str(row.get("judge_verdict") or "").strip().lower()
+        if verdict:
+            return verdict == "correct"
+        return float(row.get("observed_judge_acc") or 0.0) >= 1.0
+
+    output: list[dict[str, Any]] = []
+    for stage, field in stage_fields:
+        observable = [
+            row for row in eligible if row.get(field) is not None
+        ]
+        any_hit = [row for row in observable if float(row.get(field) or 0.0) > 0.0]
+        all_hit = [row for row in observable if float(row.get(field) or 0.0) >= 1.0]
+        output.append(
+            {
+                "stage": stage,
+                "coverage_field": field,
+                "eligible_query_count": len(eligible),
+                "observable_query_count": len(observable),
+                "mean_gold_ref_coverage": _safe_mean(
+                    row.get(field) for row in observable
+                ),
+                "any_gold_ref_hit_count": len(any_hit),
+                "any_gold_ref_hit_rate": _safe_rate(len(any_hit), len(observable)),
+                "all_gold_refs_hit_count": len(all_hit),
+                "all_gold_refs_hit_rate": _safe_rate(len(all_hit), len(observable)),
+                "observed_judge_correct_rate_given_any_hit": _safe_rate(
+                    sum(1 for row in any_hit if observed_correct(row)),
+                    len(any_hit),
+                ),
+                "observed_judge_correct_rate_given_all_hit": _safe_rate(
+                    sum(1 for row in all_hit if observed_correct(row)),
+                    len(all_hit),
+                ),
+            }
+        )
+    return output
 
 
 def _deprecated_surface_hit(answer_text: str, deprecated_claims: list[dict[str, Any]]) -> bool:
@@ -743,7 +914,6 @@ def build_audit_packet_rows(
     support_by_query = _support_rows_by_query(answer_support_rows)
     claims_by_query = _context_claims_by_query(answer_context_claim_rows)
     raw_messages_by_id = memory_index.get("raw_messages_by_id", {})
-    raw_message_ids_by_ref = memory_index.get("raw_message_ids_by_ref", {})
     rows: list[dict[str, Any]] = []
     include_previews = str(packet_save_mode or "summary") == "compact"
     for sample_row in sample_rows:
@@ -756,10 +926,11 @@ def build_audit_packet_rows(
         )
         retrieved_refs = _dedupe_str(sample_row.get("retrieval_source_refs") or event.get("source_refs") or [])
         audit_refs = support_refs or retrieved_refs
-        source_message_ids = _dedupe_str(
-            message_id
-            for ref in audit_refs
-            for message_id in raw_message_ids_by_ref.get(ref, set())
+        sample_id = str(sample_row.get("sample_id") or "")
+        source_message_ids = source_message_ids_for_refs(
+            memory_index,
+            sample_id=sample_id,
+            source_refs=audit_refs,
         )
         source_texts = [
             str(raw_messages_by_id[message_id].get("content") or "")
@@ -779,8 +950,9 @@ def build_audit_packet_rows(
             )
         )
         row = {
-            "schema_version": "audit_packet_v1",
-            "sample_id": str(sample_row.get("sample_id") or ""),
+            "schema_version": "audit_packet_v2",
+            "contains_sensitive_text": True,
+            "sample_id": sample_id,
             "query_task_id": query_task_id,
             "question": sample_row.get("question"),
             "answer_preview": _compact_text(sample_row.get("answer_text"), limit=260),
@@ -1034,14 +1206,39 @@ def _conflict_obsolete_rows(
         )
         for row in audit_rows
     }
-    obsolete_predictions = {
+    obsolete_risk_predictions = {
         (str(row.get("sample_id") or ""), str(row.get("query_task_id") or "")): bool(
             row.get("obsolete_answer_risk_proxy")
         )
         for row in audit_rows
     }
-    conflict_metrics = _binary_metric_rows(conflict_predictions, labels, "true_conflict_handled")
-    obsolete_metrics = _binary_metric_rows(obsolete_predictions, labels, "true_obsolete_handled")
+    conflict_detection_metrics = _binary_metric_rows(
+        conflict_predictions,
+        labels,
+        "true_conflict_required",
+    )
+    obsolete_safe_predictions = {
+        key: not risk
+        for key, risk in obsolete_risk_predictions.items()
+        if labels.get(key, {}).get("true_obsolete_required") is True
+    }
+    obsolete_proxy_metrics = _binary_metric_rows(
+        obsolete_safe_predictions,
+        labels,
+        "true_obsolete_handled",
+    )
+    conflict_handled_labels = [
+        bool(label.get("true_conflict_handled"))
+        for label in labels.values()
+        if label.get("true_conflict_required") is True
+        and label.get("true_conflict_handled") is not None
+    ]
+    obsolete_handled_labels = [
+        bool(label.get("true_obsolete_handled"))
+        for label in labels.values()
+        if label.get("true_obsolete_required") is True
+        and label.get("true_obsolete_handled") is not None
+    ]
     output: list[dict[str, Any]] = []
     for baseline in baselines:
         if baseline != "trajwiki_observed":
@@ -1056,6 +1253,10 @@ def _conflict_obsolete_rows(
                     "obsolete_answer_risk_proxy_rate": None,
                     "conflict_accuracy_if_labeled": None,
                     "obsolete_accuracy_if_labeled": None,
+                    "conflict_detection_f1_if_labeled": None,
+                    "conflict_handled_rate_if_labeled": None,
+                    "obsolete_handled_rate_if_labeled": None,
+                    "obsolete_proxy_f1_if_labeled": None,
                 }
             )
             continue
@@ -1079,8 +1280,28 @@ def _conflict_obsolete_rows(
                     sum(1 for row in audit_rows if row.get("obsolete_answer_risk_proxy") is True),
                     len(audit_rows),
                 ),
-                "conflict_accuracy_if_labeled": conflict_metrics.get("accuracy_if_labeled"),
-                "obsolete_accuracy_if_labeled": obsolete_metrics.get("accuracy_if_labeled"),
+                "conflict_accuracy_if_labeled": conflict_detection_metrics.get(
+                    "accuracy_if_labeled"
+                ),
+                "obsolete_accuracy_if_labeled": obsolete_proxy_metrics.get(
+                    "accuracy_if_labeled"
+                ),
+                "conflict_detection_f1_if_labeled": conflict_detection_metrics.get(
+                    "f1_if_labeled"
+                ),
+                "conflict_handled_rate_if_labeled": (
+                    _safe_mean(conflict_handled_labels)
+                    if conflict_handled_labels
+                    else None
+                ),
+                "obsolete_handled_rate_if_labeled": (
+                    _safe_mean(obsolete_handled_labels)
+                    if obsolete_handled_labels
+                    else None
+                ),
+                "obsolete_proxy_f1_if_labeled": obsolete_proxy_metrics.get(
+                    "f1_if_labeled"
+                ),
             }
         )
     return output
@@ -1230,6 +1451,7 @@ def _write_analysis_tables(
     memory_index: dict[str, Any],
     labels: dict[tuple[str, str], dict[str, Any]],
     run_meta: dict[str, Any],
+    sampling_scope: dict[str, Any] | None = None,
 ) -> dict[str, str]:
     source_support_rows = _source_support_table_rows(audit_rows, baselines)
     unsupported_rows = _unsupported_table_rows(audit_rows, baselines)
@@ -1243,6 +1465,7 @@ def _write_analysis_tables(
         analysis_dir=analysis_dir,
         labels=labels,
     )
+    funnel_rows = _error_propagation_funnel_rows(audit_rows)
     examples = _audit_examples(audit_rows)
 
     _write_csv(
@@ -1300,6 +1523,10 @@ def _write_analysis_tables(
             "obsolete_answer_risk_proxy_rate",
             "conflict_accuracy_if_labeled",
             "obsolete_accuracy_if_labeled",
+            "conflict_detection_f1_if_labeled",
+            "conflict_handled_rate_if_labeled",
+            "obsolete_handled_rate_if_labeled",
+            "obsolete_proxy_f1_if_labeled",
         ],
     )
     _write_csv(
@@ -1318,16 +1545,34 @@ def _write_analysis_tables(
             "human_audit_error_rate_if_available",
         ],
     )
+    _write_csv(
+        analysis_dir / "error_propagation_funnel.csv",
+        funnel_rows,
+        [
+            "stage",
+            "coverage_field",
+            "eligible_query_count",
+            "observable_query_count",
+            "mean_gold_ref_coverage",
+            "any_gold_ref_hit_count",
+            "any_gold_ref_hit_rate",
+            "all_gold_refs_hit_count",
+            "all_gold_refs_hit_rate",
+            "observed_judge_correct_rate_given_any_hit",
+            "observed_judge_correct_rate_given_all_hit",
+        ],
+    )
     _write_jsonl_replace(analysis_dir / "audit_examples.jsonl", examples)
     write_json(
         analysis_dir / "auditability_summary.json",
         {
-            "schema_version": "auditability_summary_v1",
+            "schema_version": "auditability_summary_v2",
             "diagnostic_mode": "offline_auditability_interpretability",
             "run_id": run_meta.get("run_id"),
             "baselines": baselines,
             "query_count": len(audit_rows),
             "label_count": len(labels),
+            "sampling_scope": sampling_scope,
             "token_estimator": TOKEN_ESTIMATOR_NAME,
             "source_supported_answer_rate_proxy": _safe_rate(
                 sum(1 for row in audit_rows if row.get("source_supported_proxy") is True),
@@ -1337,12 +1582,33 @@ def _write_analysis_tables(
                 sum(1 for row in audit_rows if row.get("unsupported_answer_risk") is True),
                 len(audit_rows),
             ),
+            "labeled_metric_definitions": {
+                "conflict_accuracy_if_labeled": (
+                    "Accuracy of conflict-visible diagnostics against "
+                    "true_conflict_required."
+                ),
+                "conflict_handled_rate_if_labeled": (
+                    "Human-labeled true_conflict_handled rate among rows where "
+                    "true_conflict_required is true."
+                ),
+                "obsolete_accuracy_if_labeled": (
+                    "Accuracy of the inverse obsolete-risk proxy against "
+                    "true_obsolete_handled, restricted to required cases."
+                ),
+                "obsolete_handled_rate_if_labeled": (
+                    "Human-labeled true_obsolete_handled rate among rows where "
+                    "true_obsolete_required is true."
+                ),
+            },
             "paths": {
                 "source_support_table": str(analysis_dir / "source_support_table.csv"),
                 "unsupported_answer_table": str(analysis_dir / "unsupported_answer_table.csv"),
                 "failure_localization_table": str(analysis_dir / "failure_localization_table.csv"),
                 "conflict_obsolete_table": str(analysis_dir / "conflict_obsolete_table.csv"),
                 "audit_packet_cost": str(analysis_dir / "audit_packet_cost.csv"),
+                "error_propagation_funnel": str(
+                    analysis_dir / "error_propagation_funnel.csv"
+                ),
                 "audit_examples": str(analysis_dir / "audit_examples.jsonl"),
                 "answer_support_rows": str(analysis_dir / "answer_support_rows.jsonl"),
                 "answer_context_claim_rows": str(analysis_dir / "answer_context_claim_rows.jsonl"),
@@ -1358,6 +1624,9 @@ def _write_analysis_tables(
         "failure_localization_table_path": str(analysis_dir / "failure_localization_table.csv"),
         "conflict_obsolete_table_path": str(analysis_dir / "conflict_obsolete_table.csv"),
         "audit_packet_cost_path": str(analysis_dir / "audit_packet_cost.csv"),
+        "error_propagation_funnel_path": str(
+            analysis_dir / "error_propagation_funnel.csv"
+        ),
         "audit_examples_path": str(analysis_dir / "audit_examples.jsonl"),
         "summary_path": str(analysis_dir / "auditability_summary.json"),
     }
@@ -1383,7 +1652,11 @@ def _build_runtime_artifacts(
         answer_context_claim_rows=answer_context_claim_rows,
         packet_save_mode=packet_save_mode,
     )
-    analysis_dir = run_dir / "analysis"
+    analysis_dir = versioned_analysis_path(
+        run_dir,
+        filename="audit_packet_rows.jsonl",
+        accepted_schema_versions={"audit_packet_v2"},
+    ).parent
     _write_jsonl_replace(analysis_dir / "answer_support_rows.jsonl", answer_support_rows)
     _write_jsonl_replace(analysis_dir / "answer_context_claim_rows.jsonl", answer_context_claim_rows)
     _write_jsonl_replace(analysis_dir / "claim_lifecycle_rows.jsonl", claim_lifecycle_rows)
@@ -1411,11 +1684,15 @@ def write_auditability_artifacts(
         run_dir=run_dir,
         packet_save_mode=packet_save_mode,
     )
-    analysis_dir = run_dir / "analysis"
+    analysis_dir = versioned_analysis_path(
+        run_dir,
+        filename="audit_packet_rows.jsonl",
+        accepted_schema_versions={"audit_packet_v2"},
+    ).parent
     write_json(
         analysis_dir / "auditability_summary.json",
         {
-            "schema_version": "auditability_summary_v1",
+            "schema_version": "auditability_summary_v2",
             "diagnostic_mode": "runtime_auditability_artifacts",
             "query_count": len(sample_rows),
             "answer_support_row_count": len(artifacts["answer_support_rows"]),
@@ -1447,6 +1724,7 @@ def analyze_auditability(
     *,
     baselines: str | Iterable[str] | None = None,
     audit_labels_path: Path | str | None = None,
+    sampling_manifest_path: Path | str | None = None,
 ) -> dict[str, Any]:
     run_dir = Path(run_path).expanduser().resolve()
     if run_dir.is_file():
@@ -1454,21 +1732,59 @@ def analyze_auditability(
     run_meta, sample_rows, database_path = load_details_rows(run_dir)
     if str(run_meta.get("dataset")).lower() != "locomo":
         raise ValueError("Auditability analysis currently supports LOCOMO runs only.")
+    all_sample_rows = sample_rows
+    scope = load_query_scope(sampling_manifest_path)
+    if scope is not None:
+        validate_scope_against_rows(
+            scope,
+            all_sample_rows,
+            run_dir=run_dir,
+        )
     selected_baselines = parse_str_list(baselines, DEFAULT_BASELINES)
-    analysis_dir = run_dir / "analysis"
+    primary_dir = run_dir / "analysis"
+    v2_dir = run_dir / "analysis_v2"
+    runtime_analysis_dir = (
+        v2_dir if (v2_dir / "audit_packet_rows.jsonl").exists() else primary_dir
+    )
     memory_index = build_memory_index(database_path)
     retrieval_events = _load_retrieval_events(database_path, memory_index)
 
-    answer_support_rows = _read_jsonl(analysis_dir / "answer_support_rows.jsonl")
-    answer_context_claim_rows = _read_jsonl(analysis_dir / "answer_context_claim_rows.jsonl")
-    claim_lifecycle_rows = _read_jsonl(analysis_dir / "claim_lifecycle_rows.jsonl")
-    audit_packet_rows = _read_jsonl(analysis_dir / "audit_packet_rows.jsonl")
-    if not (answer_support_rows and audit_packet_rows):
+    answer_support_rows = _read_jsonl(runtime_analysis_dir / "answer_support_rows.jsonl")
+    answer_context_claim_rows = _read_jsonl(
+        runtime_analysis_dir / "answer_context_claim_rows.jsonl"
+    )
+    claim_lifecycle_rows = _read_jsonl(
+        runtime_analysis_dir / "claim_lifecycle_rows.jsonl"
+    )
+    audit_packet_rows = _read_jsonl(runtime_analysis_dir / "audit_packet_rows.jsonl")
+    packet_versions = {str(row.get("schema_version") or "") for row in audit_packet_rows}
+    expected_query_ids = {
+        str(row.get("query_task_id") or "")
+        for row in all_sample_rows
+        if str(row.get("query_task_id") or "")
+    }
+
+    def complete_query_rows(rows: list[dict[str, Any]]) -> bool:
+        query_ids = [
+            str(row.get("query_task_id") or "")
+            for row in rows
+            if str(row.get("query_task_id") or "")
+        ]
+        return len(query_ids) == len(set(query_ids)) and set(query_ids) == expected_query_ids
+
+    if (
+        not complete_query_rows(answer_support_rows)
+        or not complete_query_rows(audit_packet_rows)
+        or packet_versions != {"audit_packet_v2"}
+    ):
         runtime = _build_runtime_artifacts(
-            sample_rows=sample_rows,
+            sample_rows=all_sample_rows,
             database_path=database_path,
             run_dir=run_dir,
             packet_save_mode="summary",
+        )
+        runtime_analysis_dir = (
+            v2_dir if (v2_dir / "audit_packet_rows.jsonl").exists() else primary_dir
         )
         memory_index = runtime["memory_index"]
         retrieval_events = runtime["retrieval_events"]
@@ -1477,23 +1793,74 @@ def analyze_auditability(
         claim_lifecycle_rows = runtime["claim_lifecycle_rows"]
         audit_packet_rows = runtime["audit_packet_rows"]
     elif not answer_context_claim_rows:
-        answer_context_claim_rows = build_answer_context_claim_rows(sample_rows, memory_index, retrieval_events)
-        _write_jsonl_replace(analysis_dir / "answer_context_claim_rows.jsonl", answer_context_claim_rows)
+        answer_context_claim_rows = build_answer_context_claim_rows(
+            all_sample_rows,
+            memory_index,
+            retrieval_events,
+        )
+        _write_jsonl_replace(
+            runtime_analysis_dir / "answer_context_claim_rows.jsonl",
+            answer_context_claim_rows,
+        )
     if not claim_lifecycle_rows:
         claim_lifecycle_rows = build_claim_lifecycle_rows(database_path, memory_index)
-        _write_jsonl_replace(analysis_dir / "claim_lifecycle_rows.jsonl", claim_lifecycle_rows)
+        _write_jsonl_replace(
+            runtime_analysis_dir / "claim_lifecycle_rows.jsonl",
+            claim_lifecycle_rows,
+        )
 
-    gold_rows = load_or_build_gold_labels(run_dir, sample_rows, memory_index)
+    gold_rows = load_or_build_gold_labels(run_dir, all_sample_rows, memory_index)
     audit_rows = build_auditability_rows(
-        sample_rows=sample_rows,
+        sample_rows=all_sample_rows,
         gold_rows=gold_rows,
         memory_index=memory_index,
         retrieval_events=retrieval_events,
         answer_support_rows=answer_support_rows,
         answer_context_claim_rows=answer_context_claim_rows,
     )
+    analysis_dir = (
+        scoped_analysis_dir(run_dir, scope)
+        if scope is not None
+        else runtime_analysis_dir
+    )
+    if scope is not None:
+        sample_rows = filter_query_rows(all_sample_rows, scope)
+        audit_rows = filter_query_rows(audit_rows, scope)
+        answer_support_rows = filter_query_rows(answer_support_rows, scope)
+        answer_context_claim_rows = filter_query_rows(
+            answer_context_claim_rows,
+            scope,
+        )
+        audit_packet_rows = filter_query_rows(audit_packet_rows, scope)
+        claim_lifecycle_rows = [
+            row
+            for row in claim_lifecycle_rows
+            if str(row.get("sample_id") or "") in scope.sample_ids
+        ]
+        _write_jsonl_replace(
+            analysis_dir / "answer_support_rows.jsonl",
+            answer_support_rows,
+        )
+        _write_jsonl_replace(
+            analysis_dir / "answer_context_claim_rows.jsonl",
+            answer_context_claim_rows,
+        )
+        _write_jsonl_replace(
+            analysis_dir / "claim_lifecycle_rows.jsonl",
+            claim_lifecycle_rows,
+        )
+        _write_jsonl_replace(
+            analysis_dir / "audit_packet_rows.jsonl",
+            audit_packet_rows,
+        )
     _write_jsonl_replace(analysis_dir / "auditability_rows.jsonl", audit_rows)
     labels = load_audit_labels(audit_labels_path)
+    if scope is not None:
+        labels = {
+            key: value
+            for key, value in labels.items()
+            if key[1] in scope.query_ids
+        }
     paths = _write_analysis_tables(
         analysis_dir=analysis_dir,
         baselines=selected_baselines,
@@ -1503,12 +1870,14 @@ def analyze_auditability(
         memory_index=memory_index,
         labels=labels,
         run_meta=run_meta,
+        sampling_scope=scope.metadata() if scope is not None else None,
     )
     return {
-        "schema_version": "auditability_report_v1",
+        "schema_version": "auditability_report_v2",
         "run_dir": str(run_dir),
         "analysis_dir": str(analysis_dir),
         "query_count": len(sample_rows),
+        "sampling_scope": scope.metadata() if scope is not None else None,
         "baselines": selected_baselines,
         "audit_labels_path": str(audit_labels_path) if audit_labels_path else None,
         "answer_support_rows_path": str(analysis_dir / "answer_support_rows.jsonl"),

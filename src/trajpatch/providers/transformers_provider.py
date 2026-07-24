@@ -292,6 +292,9 @@ class TransformersLLMProvider(LLMProvider):
     @classmethod
     def _resolve_generation_budget(cls, metadata: dict[str, Any] | None = None) -> int:
         metadata = metadata or {}
+        explicit_budget = metadata.get("generation_max_tokens")
+        if explicit_budget is not None:
+            return max(1, int(explicit_budget))
         task = str(metadata.get("task") or "").strip()
         repair_round = metadata.get("repair_round")
         if repair_round is not None and task in cls._REPAIR_MAX_NEW_TOKENS:
@@ -320,6 +323,10 @@ class TransformersLLMProvider(LLMProvider):
             "do_sample": False,
             "max_new_tokens": self._resolve_generation_budget(metadata),
         }
+        requested_temperature = (metadata or {}).get("generation_temperature")
+        if requested_temperature is not None and float(requested_temperature) > 0:
+            generation_kwargs["do_sample"] = True
+            generation_kwargs["temperature"] = float(requested_temperature)
         if pad_token_id is not None:
             generation_kwargs["pad_token_id"] = pad_token_id
         if eos_token_id is not None:
@@ -346,6 +353,11 @@ class TransformersLLMProvider(LLMProvider):
         assert self._tokenizer is not None
         generation_inputs, prompt_metadata = self._build_generation_inputs(messages, system_prompt)
         generation_kwargs = self._build_generation_kwargs(metadata)
+        generation_seed = (metadata or {}).get("generation_seed")
+        if generation_seed is not None:
+            import torch
+
+            torch.manual_seed(int(generation_seed))
         generation_budget_tokens = int(generation_kwargs["max_new_tokens"])
         generated_ids = self._model.generate(
             input_ids=generation_inputs["input_ids"],
@@ -364,6 +376,13 @@ class TransformersLLMProvider(LLMProvider):
                 "chat_template_fallback": prompt_metadata["chat_template_fallback"],
                 "generation_kwargs": generation_kwargs,
                 "generation_budget_tokens": generation_budget_tokens,
+                "generation_temperature_requested": (metadata or {}).get(
+                    "generation_temperature"
+                ),
+                "generation_seed_requested": generation_seed,
+                "generation_max_tokens_requested": (metadata or {}).get(
+                    "generation_max_tokens"
+                ),
             },
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
@@ -374,6 +393,13 @@ class TransformersLLMProvider(LLMProvider):
                 "chat_template_fallback": prompt_metadata["chat_template_fallback"],
                 "generation_kwargs": generation_kwargs,
                 "generation_budget_tokens": generation_budget_tokens,
+                "generation_temperature_requested": (metadata or {}).get(
+                    "generation_temperature"
+                ),
+                "generation_seed_requested": generation_seed,
+                "generation_max_tokens_requested": (metadata or {}).get(
+                    "generation_max_tokens"
+                ),
             },
         )
 
@@ -391,6 +417,11 @@ class TransformersLLMProvider(LLMProvider):
         assert self._tokenizer is not None
         generation_inputs, prompt_metadata = self._build_batch_generation_inputs(batch_messages, system_prompt)
         generation_kwargs = self._build_generation_kwargs(metadata)
+        generation_seed = (metadata or {}).get("generation_seed")
+        if generation_seed is not None:
+            import torch
+
+            torch.manual_seed(int(generation_seed))
         generation_budget_tokens = int(generation_kwargs["max_new_tokens"])
         generated_ids = self._model.generate(
             input_ids=generation_inputs["input_ids"],
@@ -417,6 +448,13 @@ class TransformersLLMProvider(LLMProvider):
                         "chat_template_fallback": item["chat_template_fallback"],
                         "generation_kwargs": generation_kwargs,
                         "generation_budget_tokens": generation_budget_tokens,
+                        "generation_temperature_requested": (metadata or {}).get(
+                            "generation_temperature"
+                        ),
+                        "generation_seed_requested": generation_seed,
+                        "generation_max_tokens_requested": (metadata or {}).get(
+                            "generation_max_tokens"
+                        ),
                         "batched": True,
                         "batch_size": batch_size,
                         "batch_index": index,
@@ -430,6 +468,13 @@ class TransformersLLMProvider(LLMProvider):
                         "chat_template_fallback": item["chat_template_fallback"],
                         "generation_kwargs": generation_kwargs,
                         "generation_budget_tokens": generation_budget_tokens,
+                        "generation_temperature_requested": (metadata or {}).get(
+                            "generation_temperature"
+                        ),
+                        "generation_seed_requested": generation_seed,
+                        "generation_max_tokens_requested": (metadata or {}).get(
+                            "generation_max_tokens"
+                        ),
                         "batched": True,
                         "batch_size": batch_size,
                         "batch_index": index,

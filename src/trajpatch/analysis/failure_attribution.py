@@ -21,6 +21,13 @@ from trajpatch.diagnostics.fallback_repair import (
     summarize_fallback_repair_events,
 )
 from trajpatch.analysis.direct_retrieval import rank_direct_trajectories as _shared_rank_direct_trajectories
+from trajpatch.analysis.memory_index import build_sample_scoped_ref_indexes
+from trajpatch.analysis.query_scope import (
+    filter_query_rows,
+    load_query_scope,
+    scoped_analysis_dir,
+    validate_scope_against_rows,
+)
 from trajpatch.analysis.trajectory_drift import (
     build_trajectory_drift_diagnostics,
     build_trajectory_drift_rows,
@@ -4740,6 +4747,11 @@ def _load_run_indexes(database_path: Path) -> dict[str, Any]:
                 ),
             }
 
+        sample_scoped_ref_indexes = build_sample_scoped_ref_indexes(
+            raw_messages_by_id=raw_messages_by_id,
+            trajectory_refs=trajectory_refs,
+            trajectory_to_sample=trajectory_to_sample,
+        )
         return {
             "sample_memory_refs": sample_memory_refs,
             "retrieval_events": retrieval_events,
@@ -4772,6 +4784,7 @@ def _load_run_indexes(database_path: Path) -> dict[str, Any]:
             "snapshot_claim_facets": snapshot_claim_facets,
             "raw_messages_by_id": raw_messages_by_id,
             "raw_message_ids_by_ref": raw_message_ids_by_ref,
+            **sample_scoped_ref_indexes,
             "sample_entity_lexicons": sample_entity_lexicons,
             "force_recall_counts": dict(force_recall_counts),
         }
@@ -5000,10 +5013,21 @@ def _entity_cluster_ratio(cluster_rows: list[tuple[str, ...]]) -> float | None:
 
 
 def analyze_locomo_run_failures(
-    run_path: Path | str, *, top_examples_per_bucket: int = 5
+    run_path: Path | str,
+    *,
+    top_examples_per_bucket: int = 5,
+    sampling_manifest_path: Path | str | None = None,
 ) -> dict[str, Any]:
     run_dir = _resolve_run_dir(run_path)
     run_meta, sample_rows, database_path = _load_run_details(run_dir)
+    scope = load_query_scope(sampling_manifest_path)
+    if scope is not None:
+        validate_scope_against_rows(
+            scope,
+            sample_rows,
+            run_dir=run_dir,
+        )
+        sample_rows = filter_query_rows(sample_rows, scope)
     details_path = run_dir / "details.json"
     summary_payload = _load_json(run_dir / "summary.json") if (run_dir / "summary.json").exists() else {}
     text_only_filter_diagnostics = dict(
@@ -5029,6 +5053,23 @@ def analyze_locomo_run_failures(
         }
     llm_call_diagnostics = dict(summary_payload.get("llm_call_diagnostics") or {})
     fallback_repair_events = _load_jsonl(run_dir / "fallback_repair_events.jsonl")
+    if scope is not None:
+        scoped_events: list[dict[str, Any]] = []
+        for event in fallback_repair_events:
+            metadata = dict(event.get("metadata") or {})
+            query_task_id = str(
+                event.get("query_task_id")
+                or metadata.get("query_task_id")
+                or ""
+            ).strip()
+            sample_id = str(
+                event.get("sample_id") or metadata.get("sample_id") or ""
+            ).strip()
+            if query_task_id and query_task_id in scope.query_ids:
+                scoped_events.append(event)
+            elif not query_task_id and sample_id and sample_id in scope.sample_ids:
+                scoped_events.append(event)
+        fallback_repair_events = scoped_events
     fallback_repair_diagnostics = (
         summarize_fallback_repair_events(fallback_repair_events, sample_rows)
         if fallback_repair_events
@@ -5061,13 +5102,21 @@ def analyze_locomo_run_failures(
     claims_by_trajectory: dict[str, list[dict[str, Any]]] = indexes["claims_by_trajectory"]
     sample_entity_lexicons: dict[str, dict[str, str]] = indexes["sample_entity_lexicons"]
     raw_messages_by_id: dict[str, dict[str, Any]] = indexes["raw_messages_by_id"]
-    raw_message_ids_by_ref: dict[str, set[str]] = indexes["raw_message_ids_by_ref"]
+    sample_raw_message_ids_by_ref: dict[str, dict[str, set[str]]] = indexes[
+        "sample_raw_message_ids_by_ref"
+    ]
     trajectory_drift_rows = build_trajectory_drift_rows(
         database_path=database_path,
         trajectory_to_sample=trajectory_to_sample,
         trajectory_snapshot_ids_ordered=trajectory_snapshot_ids_ordered,
         snapshot_versions=snapshot_versions,
     )
+    if scope is not None:
+        trajectory_drift_rows = [
+            row
+            for row in trajectory_drift_rows
+            if str(row.get("sample_id") or "") in scope.sample_ids
+        ]
     trajectory_drift_rows_by_id = {
         str(row.get("trajectory_id")): row
         for row in trajectory_drift_rows
@@ -5203,7 +5252,7 @@ def analyze_locomo_run_failures(
             grounded_refs=grounded_refs,
             retrieval_metadata=dict(retrieval_event.get("metadata") or {}),
             raw_messages_by_id=raw_messages_by_id,
-            raw_message_ids_by_ref=raw_message_ids_by_ref,
+            raw_message_ids_by_ref=sample_raw_message_ids_by_ref.get(sample_id, {}),
         )
         raw_rescue_gold_hit = bool(set(reflection_fields["raw_rescue_source_refs"]) & gold_refs)
         reflection_fields["raw_rescue_compensated_memory_gap"] = bool(
@@ -5329,7 +5378,7 @@ def analyze_locomo_run_failures(
             gold_page_ids=gold_page_ids,
             trajectory_metadata=trajectory_metadata,
             page_markdown_by_id=page_markdown_by_id,
-            raw_message_ids_by_ref=raw_message_ids_by_ref,
+            raw_message_ids_by_ref=sample_raw_message_ids_by_ref.get(sample_id, {}),
             raw_messages_by_id=raw_messages_by_id,
         )
         gold_facet_relations = {
@@ -5899,7 +5948,7 @@ def analyze_locomo_run_failures(
             grounded_refs=set(retrieval_event.get("grounded_source_refs", [])),
             retrieval_metadata=retrieval_metadata,
             raw_messages_by_id=raw_messages_by_id,
-            raw_message_ids_by_ref=raw_message_ids_by_ref,
+            raw_message_ids_by_ref=sample_raw_message_ids_by_ref.get(sample_id, {}),
         )
         selection_pool_trajectory_ids = _selection_pool_ids_from_metadata(retrieval_metadata)
         selected_page_trajectory_ids = [
@@ -6094,7 +6143,7 @@ def analyze_locomo_run_failures(
             gold_page_ids=gold_page_ids,
             trajectory_metadata=trajectory_metadata,
             page_markdown_by_id=page_markdown_by_id,
-            raw_message_ids_by_ref=raw_message_ids_by_ref,
+            raw_message_ids_by_ref=sample_raw_message_ids_by_ref.get(sample_id, {}),
             raw_messages_by_id=raw_messages_by_id,
         )
         preservation_and_stage = _compute_preservation_and_stage_fields(
@@ -6445,9 +6494,6 @@ def analyze_locomo_run_failures(
     selected_page_slot_count = 0
     selected_singleton_slot_count = 0
     selected_medium_slot_count = 0
-    page_granularity_available_rows = [
-        row for row in query_outcomes if bool(row.get("page_granularity_metadata_available"))
-    ]
     for row in query_outcomes:
         histogram = dict(row.get("selected_page_trajectory_count_histogram") or {})
         for count_text, frequency in histogram.items():
@@ -6589,6 +6635,11 @@ def analyze_locomo_run_failures(
             "resolved_run_dir": str(run_dir),
             "details_path": str(details_path),
             "database_path": str(database_path),
+        },
+        "analysis_scope": {
+            **(scope.metadata() if scope is not None else {}),
+            "mode": "sampling_manifest" if scope is not None else "full_run",
+            "run_level_summary_blocks_may_remain_unfiltered": bool(scope is not None),
         },
         "totals": {
             "total_queries": total_queries,
@@ -6874,7 +6925,7 @@ def analyze_locomo_run_failures(
         "query_outcomes": query_outcomes,
     }
     try:
-        analysis_dir = run_dir / "analysis"
+        analysis_dir = scoped_analysis_dir(run_dir, scope)
         _write_json_artifact(
             analysis_dir / "direct_retrieval_ablation.json",
             {

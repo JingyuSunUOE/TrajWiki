@@ -70,7 +70,8 @@ def test_cost_benefit_artifacts_are_generated_from_mock_locomo_run(tmp_path: Pat
         json.loads(line) for line in cost_query_path.read_text(encoding="utf-8").splitlines() if line
     ]
     assert call_rows
-    assert query_rows[0]["schema_version"] == "cost_query_v1"
+    assert query_rows[0]["schema_version"] == "cost_query_v2"
+    assert (run_dir / "analysis" / "cost_reconciliation.json").exists()
 
     analyze_offline_ablation(
         run_dir,

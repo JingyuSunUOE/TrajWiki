@@ -8,7 +8,7 @@ from datetime import datetime
 from typing import Any
 
 from trajpatch.exceptions import ParserValidationError
-from trajpatch.memory.schemas import ClaimOp, EpisodicMemoryInput, MemoryClaim
+from trajpatch.memory.schemas import EpisodicMemoryInput
 from trajpatch.types import NormalizedMessage
 from trajpatch.utils.text import collapse_whitespace, extract_keywords
 
@@ -296,7 +296,7 @@ def build_section_repair_prompt(
         + "\n\nValidation error:\n"
         + validation_error
         + "\n\nRules:\n"
-        + f"- Preserve the accepted content exactly.\n"
+        + "- Preserve the accepted content exactly.\n"
         + "- Only output the missing or corrected DSL content.\n"
         + f"- Put the corrected DSL inside {MEMORY_DSL_START_MARKER} and {MEMORY_DSL_END_MARKER}.\n"
         + "- Do not add any commentary outside the requested repair."

@@ -5,6 +5,7 @@ import sqlite3
 from pathlib import Path
 
 from trajpatch.analysis.auditability import (
+    _conflict_obsolete_rows,
     build_answer_context_claim_rows,
     build_answer_support_rows,
     build_auditability_rows,
@@ -22,6 +23,13 @@ def _toy_memory_index() -> dict:
         },
         "sample_to_trajectories": {"sample-1": {"traj-1"}},
         "trajectory_refs": {"traj-1": {"D1:1"}},
+        "sample_raw_messages": {
+            "sample-1": [
+                {"id": "m1", "source_ref": "D1:1"},
+                {"id": "m2", "source_ref": "D1:2"},
+            ]
+        },
+        "page_to_trajectory_ids": {"page-1": ["traj-1"]},
         "claims_by_snapshot": {
             "snap-1": [
                 {
@@ -71,6 +79,7 @@ def test_answer_support_rows_parse_structured_items_and_invalid_refs() -> None:
 
     final = next(row for row in rows if row["item_kind"] == "final_answer")
     assert final["support_status"] == "invalid_source_ref"
+    assert final["contains_sensitive_text"] is True
     assert final["source_refs"] == ["D1:1", "D1:2"]
     assert final["invalid_supporting_refs"] == ["D9:9"]
     assert any(row["item_kind"] == "supported_list_item" and row["source_message_ids"] == ["m1"] for row in rows)
@@ -82,6 +91,7 @@ def test_context_claim_rows_mark_deprecated_claims_suppressed() -> None:
     rows = build_answer_context_claim_rows(sample_rows, _toy_memory_index(), retrieval_events)
 
     deprecated = next(row for row in rows if row["claim_id"] == "claim-2")
+    assert deprecated["contains_sensitive_text"] is True
     assert deprecated["kept_in_answer_context"] is False
     assert deprecated["suppressed_reason"] == "deprecated"
     active = next(row for row in rows if row["claim_id"] == "claim-1")
@@ -139,6 +149,11 @@ def test_auditability_rows_flag_no_gold_overlap_as_unsupported() -> None:
     assert rows[0]["source_supported_proxy"] is False
     assert rows[0]["unsupported_answer_risk"] is True
     assert rows[0]["unsupported_reason"] == "support_refs_no_gold_overlap"
+    assert rows[0]["stored_gold_ref_coverage"] == 1.0
+    assert rows[0]["trajectory_linked_gold_ref_coverage"] == 1.0
+    assert rows[0]["page_routed_gold_ref_coverage"] == 1.0
+    assert rows[0]["trajectory_selected_gold_ref_coverage"] == 1.0
+    assert rows[0]["snapshot_expanded_gold_ref_coverage"] == 1.0
 
 
 def test_claim_lifecycle_rows_export_add_revise_deprecate(tmp_path: Path) -> None:
@@ -181,6 +196,7 @@ def test_claim_lifecycle_rows_export_add_revise_deprecate(tmp_path: Path) -> Non
 
     rows = build_claim_lifecycle_rows(db_path, _toy_memory_index())
     assert {row["op_type"] for row in rows} == {"ADD", "REVISE", "DEPRECATE"}
+    assert all(row["contains_sensitive_text"] is True for row in rows)
     assert rows[0]["source_refs"] == ["D1:1"]
 
 
@@ -205,3 +221,43 @@ def test_load_audit_labels_accepts_partial_csv(tmp_path: Path) -> None:
     label = labels[("sample-1", "query-1")]
     assert label["true_source_supported"] is True
     assert label["human_audit_seconds"] == 12.5
+
+
+def test_conflict_and_obsolete_labels_use_matching_metric_semantics() -> None:
+    audit_rows = [
+        {
+            "sample_id": "sample-1",
+            "query_task_id": "query-1",
+            "conflict_claim_visible": True,
+            "obsolete_answer_risk_proxy": False,
+        },
+        {
+            "sample_id": "sample-1",
+            "query_task_id": "query-2",
+            "conflict_claim_visible": False,
+            "obsolete_answer_risk_proxy": True,
+        },
+    ]
+    labels = {
+        ("sample-1", "query-1"): {
+            "true_conflict_required": True,
+            "true_conflict_handled": True,
+            "true_obsolete_required": False,
+        },
+        ("sample-1", "query-2"): {
+            "true_conflict_required": False,
+            "true_obsolete_required": True,
+            "true_obsolete_handled": False,
+        },
+    }
+
+    row = _conflict_obsolete_rows(
+        audit_rows,
+        labels,
+        ["trajwiki_observed"],
+    )[0]
+
+    assert row["conflict_accuracy_if_labeled"] == 1.0
+    assert row["conflict_handled_rate_if_labeled"] == 1.0
+    assert row["obsolete_accuracy_if_labeled"] == 1.0
+    assert row["obsolete_handled_rate_if_labeled"] == 0.0

@@ -9,6 +9,11 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
+from trajpatch.analysis.memory_index import (
+    build_sample_scoped_ref_indexes,
+    source_message_ids_for_refs,
+    versioned_analysis_path,
+)
 from trajpatch.utils.json_utils import append_jsonl
 
 SOURCE_REF_RE = re.compile(r"\bD\d+:\d+\b")
@@ -56,7 +61,12 @@ def load_details_rows(run_dir: Path) -> tuple[dict[str, Any], list[dict[str, Any
     details_path = run_dir / "details.json"
     details = json.loads(details_path.read_text(encoding="utf-8"))
     run_meta = dict(details.get("run_meta") or {})
-    database_path = Path(run_meta.get("database_path") or run_dir / "trajpatch.sqlite")
+    recorded_database_path = Path(run_meta.get("database_path") or run_dir / "trajpatch.sqlite").expanduser()
+    local_database_path = run_dir / "trajpatch.sqlite"
+    database_path = recorded_database_path if recorded_database_path.exists() else local_database_path
+    if not database_path.exists():
+        database_path = recorded_database_path
+    run_meta["database_path"] = str(database_path)
     return run_meta, list(details.get("samples") or []), database_path
 
 
@@ -147,10 +157,11 @@ def build_memory_index(database_path: Path) -> dict[str, Any]:
         snapshot_texts: dict[str, str] = {}
         snapshot_versions: dict[str, int] = {}
         snapshot_metadata: dict[str, dict[str, Any]] = {}
+        snapshot_records: dict[str, dict[str, Any]] = {}
         for row in connection.execute(
             """
-            SELECT id, trajectory_id, version, links_json, summary_content, context, semantic_text,
-                   raw_text, metadata_json
+            SELECT id, trajectory_id, version, timestamp, links_json, summary_content, context,
+                   keywords_json, status_flags_json, semantic_text, raw_text, metadata_json
             FROM episodic_snapshots
             """
         ):
@@ -177,6 +188,26 @@ def build_memory_index(database_path: Path) -> dict[str, Any]:
             snapshot_refs[snapshot_id] = refs
             snapshot_source_message_ids[snapshot_id] = source_ids
             snapshot_metadata[snapshot_id] = dict(load_json_field(row["metadata_json"], {}))
+            snapshot_records[snapshot_id] = {
+                "id": snapshot_id,
+                "trajectory_id": trajectory_id,
+                "version": version,
+                "timestamp": str(row["timestamp"] or ""),
+                "summary_content": str(row["summary_content"] or ""),
+                "context": str(row["context"] or ""),
+                "keywords": [
+                    str(item)
+                    for item in load_json_field(row["keywords_json"], [])
+                    if str(item).strip()
+                ],
+                "status_flags": [
+                    str(item)
+                    for item in load_json_field(row["status_flags_json"], [])
+                    if str(item).strip()
+                ],
+                "source_message_ids": source_ids,
+                "source_refs": refs,
+            }
             snapshot_texts[snapshot_id] = "\n".join(
                 str(value or "")
                 for value in [
@@ -230,7 +261,7 @@ def build_memory_index(database_path: Path) -> dict[str, Any]:
             for ref in refs:
                 source_ref_to_trajectories[ref].add(trajectory_id)
 
-        return {
+        index = {
             "raw_messages_by_id": raw_messages_by_id,
             "raw_message_ids_by_ref": raw_message_ids_by_ref,
             "sample_raw_messages": sample_raw_messages,
@@ -248,6 +279,7 @@ def build_memory_index(database_path: Path) -> dict[str, Any]:
             "snapshot_texts": snapshot_texts,
             "snapshot_versions": snapshot_versions,
             "snapshot_metadata": snapshot_metadata,
+            "snapshot_records": snapshot_records,
             "page_to_trajectory_ids": page_to_trajectory_ids,
             "page_to_sample": page_to_sample,
             "page_types": page_types,
@@ -256,6 +288,14 @@ def build_memory_index(database_path: Path) -> dict[str, Any]:
             "sample_to_pages": sample_to_pages,
             "source_ref_to_trajectories": source_ref_to_trajectories,
         }
+        index.update(
+            build_sample_scoped_ref_indexes(
+                raw_messages_by_id=raw_messages_by_id,
+                trajectory_refs=trajectory_refs,
+                trajectory_to_sample=trajectory_to_sample,
+            )
+        )
+        return index
     finally:
         connection.close()
 
@@ -264,7 +304,6 @@ def build_gold_label_rows(
     sample_rows: list[dict[str, Any]],
     memory_index: dict[str, Any],
 ) -> list[dict[str, Any]]:
-    raw_message_ids_by_ref = memory_index["raw_message_ids_by_ref"]
     sample_to_trajectories = memory_index["sample_to_trajectories"]
     trajectory_refs = memory_index["trajectory_refs"]
     sample_to_pages = memory_index["sample_to_pages"]
@@ -280,12 +319,10 @@ def build_gold_label_rows(
         query_metadata = dict(dict(row.get("metadata") or {}).get("query_metadata") or {})
         gold_refs = gold_refs_from_query_metadata(query_metadata)
         gold_ref_set = set(gold_refs)
-        gold_source_message_ids = sorted(
-            {
-                message_id
-                for ref in gold_refs
-                for message_id in raw_message_ids_by_ref.get(ref, set())
-            }
+        gold_source_message_ids = source_message_ids_for_refs(
+            memory_index,
+            sample_id=sample_id,
+            source_refs=gold_refs,
         )
         gold_trajectory_ids = sorted(
             trajectory_id
@@ -307,7 +344,8 @@ def build_gold_label_rows(
         )
         rows.append(
             {
-                "schema_version": "gold_labels_v1",
+                "schema_version": "gold_labels_v2",
+                "contains_sensitive_text": True,
                 "sample_id": sample_id,
                 "query_task_id": str(row.get("query_task_id") or ""),
                 "question": str(row.get("question") or ""),
@@ -339,7 +377,11 @@ def write_gold_labels_artifact(
         database_path = resolved_database_path
     memory_index = build_memory_index(database_path)
     rows = build_gold_label_rows(sample_rows, memory_index)
-    path = run_dir / "analysis" / "gold_labels.jsonl"
+    path = versioned_analysis_path(
+        run_dir,
+        filename="gold_labels.jsonl",
+        accepted_schema_versions={"gold_labels_v2"},
+    )
     if path.exists():
         path.unlink()
     append_jsonl(path, rows)
@@ -351,13 +393,56 @@ def load_or_build_gold_labels(
     sample_rows: list[dict[str, Any]],
     memory_index: dict[str, Any],
 ) -> list[dict[str, Any]]:
-    path = run_dir / "analysis" / "gold_labels.jsonl"
-    if path.exists():
+    expected_keys = {
+        (str(row.get("sample_id") or ""), str(row.get("query_task_id") or ""))
+        for row in sample_rows
+    }
+    primary_path = run_dir / "analysis" / "gold_labels.jsonl"
+    v2_path = run_dir / "analysis_v2" / "gold_labels.jsonl"
+
+    def load_complete(path: Path) -> list[dict[str, Any]] | None:
         rows: list[dict[str, Any]] = []
-        for line in path.read_text(encoding="utf-8").splitlines():
-            if line.strip():
-                rows.append(json.loads(line))
+        try:
+            for line in path.read_text(encoding="utf-8").splitlines():
+                if line.strip():
+                    rows.append(json.loads(line))
+        except (OSError, ValueError, TypeError):
+            return None
+        versions = {str(row.get("schema_version") or "") for row in rows}
+        row_keys = [
+            (str(row.get("sample_id") or ""), str(row.get("query_task_id") or ""))
+            for row in rows
+        ]
+        if (
+            rows
+            and versions == {"gold_labels_v2"}
+            and all(row.get("contains_sensitive_text") is True for row in rows)
+            and len(row_keys) == len(set(row_keys))
+            and set(row_keys) == expected_keys
+        ):
+            return rows
+        return None
+
+    if v2_path.exists():
+        cached = load_complete(v2_path)
+        if cached is not None:
+            return cached
+        rows = build_gold_label_rows(sample_rows, memory_index)
+        v2_path.unlink()
+        append_jsonl(v2_path, rows)
         return rows
+    if primary_path.exists():
+        cached = load_complete(primary_path)
+        if cached is not None:
+            return cached
+
     rows = build_gold_label_rows(sample_rows, memory_index)
+    path = versioned_analysis_path(
+        run_dir,
+        filename="gold_labels.jsonl",
+        accepted_schema_versions={"gold_labels_v2"},
+    )
+    if path.exists():
+        path.unlink()
     append_jsonl(path, rows)
     return rows

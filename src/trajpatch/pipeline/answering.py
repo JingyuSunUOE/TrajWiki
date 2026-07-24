@@ -6084,6 +6084,29 @@ class AnswerGenerator:
                         "answer_repair_used": False,
                     },
                 )
+        initial_stage_text = str(response.text or "")
+        initial_stage_refs = list(
+            dict(response.metadata or {}).get("answer_synthesis_supporting_refs")
+            or dict(
+                dict(response.metadata or {}).get("answer_synthesis_payload") or {}
+            ).get("supporting_source_refs")
+            or []
+        )
+        initial_stage_metadata = {
+            "answer_stage_initial_text": initial_stage_text,
+            "answer_stage_initial_supporting_refs": initial_stage_refs,
+            "answer_stage_initial_invalid_supporting_refs": list(
+                dict(response.metadata or {}).get("invalid_supporting_refs") or []
+            ),
+            "answer_stage_initial_prompt_tokens": int(response.prompt_tokens or 0),
+            "answer_stage_initial_completion_tokens": int(response.completion_tokens or 0),
+            "answer_stage_initial_provider_call_uid": dict(response.metadata or {}).get(
+                "provider_call_uid"
+            ),
+            "answer_stage_initial_call_item_uid": dict(response.metadata or {}).get(
+                "call_item_uid"
+            ),
+        }
         final_prompt = prompt
         if prompt_name == "locomo_answer_generation":
             skip_reason = self._locomo_postcheck_skip_reason(response, response.text)
@@ -6318,6 +6341,32 @@ class AnswerGenerator:
             f"latency_ms={float(response.metadata.get('latency_ms', 0.0)):.1f} "
             f"prompt_tokens={int(response.prompt_tokens or 0)} completion_tokens={int(response.completion_tokens or 0)}"
         )
+        response.metadata = {
+            **dict(response.metadata or {}),
+            **initial_stage_metadata,
+            "answer_stage_post_validation_text": str(response.text or ""),
+            "answer_stage_post_validation_supporting_refs": list(
+                dict(response.metadata or {}).get("answer_synthesis_supporting_refs")
+                or dict(
+                    dict(response.metadata or {}).get("answer_synthesis_payload") or {}
+                ).get("supporting_source_refs")
+                or []
+            ),
+            "answer_stage_post_validation_invalid_supporting_refs": list(
+                dict(response.metadata or {}).get("invalid_supporting_refs") or []
+            ),
+            "answer_stage_post_validation_prompt_tokens": (
+                int(initial_stage_metadata["answer_stage_initial_prompt_tokens"])
+                + int(dict(response.metadata or {}).get("answer_repair_prompt_tokens") or 0)
+            ),
+            "answer_stage_post_validation_completion_tokens": (
+                int(initial_stage_metadata["answer_stage_initial_completion_tokens"])
+                + int(dict(response.metadata or {}).get("answer_repair_completion_tokens") or 0)
+            ),
+            "answer_stage_post_validation_changed": (
+                initial_stage_text.strip() != str(response.text or "").strip()
+            ),
+        }
         return final_prompt, response
 
 

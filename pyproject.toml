@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "trajwiki"
 version = "0.1.0"
-description = "Long-memory benchmark framework with source-grounded trajectories, wiki routing, offline ablations, cost-benefit analysis, and auditability diagnostics."
+description = "Long-term memory benchmark framework with source-grounded trajectories, wiki routing, reproducible answer ablations, cost diagnostics, and audit studies."
 readme = "README.md"
 requires-python = ">=3.11"
 authors = [{ name = "TrajWiki Contributors" }]
@@ -15,6 +15,8 @@ keywords = [
   "benchmark",
   "auditability",
   "interpretability",
+  "provenance",
+  "ablation-study",
 ]
 dependencies = [
   "typer>=0.12",
@@ -37,6 +39,8 @@ dependencies = [
   "accelerate>=0.33",
   "sentence-transformers>=3.0",
   "safetensors>=0.4",
+  "tiktoken>=0.9",
+  "zstandard>=0.19",
   # Keep vLLM on a CUDA 12-compatible release for the CUDA 12.6 runtime image.
   # Newer unconstrained wheels may require libcudart.so.13 and fail at import time.
   "vllm==0.10.2",

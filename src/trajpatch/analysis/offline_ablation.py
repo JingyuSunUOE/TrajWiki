@@ -5,10 +5,11 @@ from __future__ import annotations
 import csv
 import sqlite3
 from collections import defaultdict
+from collections.abc import Iterable
 from pathlib import Path
 from statistics import mean
 from types import SimpleNamespace
-from typing import Any, Iterable
+from typing import Any
 
 from trajpatch.analysis.context_cost import (
     TOKEN_ESTIMATOR_NAME,
@@ -22,6 +23,16 @@ from trajpatch.analysis.gold_labels import (
     load_details_rows,
     load_json_field,
     load_or_build_gold_labels,
+)
+from trajpatch.analysis.memory_index import (
+    trajectory_ids_for_source_ref,
+    versioned_analysis_path,
+)
+from trajpatch.analysis.query_scope import (
+    filter_query_rows,
+    load_query_scope,
+    scoped_analysis_dir,
+    validate_scope_against_rows,
 )
 from trajpatch.memory.facets import (
     build_sample_entity_lexicon,
@@ -208,8 +219,85 @@ def _source_rows_for_messages(message_ids: Iterable[str], memory_index: dict[str
     return rows
 
 
-def _full_rows(event: dict[str, Any], memory_index: dict[str, Any]) -> list[dict[str, Any]]:
-    return _source_rows_for_messages(event.get("source_message_ids") or [], memory_index)
+def _full_rows(event: dict[str, Any], memory_index: dict[str, Any]) -> tuple[list[dict[str, Any]], int]:
+    selected_trajectory_ids = [
+        str(item) for item in list(event.get("trajectory_ids") or []) if str(item).strip()
+    ]
+    selected_snapshot_ids = [
+        str(item)
+        for item in list(event.get("expanded_snapshot_ids") or event.get("snapshot_ids") or [])
+        if str(item).strip()
+    ]
+    selected_snapshot_set = set(selected_snapshot_ids)
+    final_source_message_ids = {
+        str(item)
+        for item in list(event.get("source_message_ids") or [])
+        if str(item).strip()
+    }
+    rows: list[dict[str, Any]] = []
+    for rank, trajectory_id in enumerate(selected_trajectory_ids, start=1):
+        trajectory_snapshot_ids = [
+            snapshot_id
+            for snapshot_id in list(memory_index["trajectory_to_snapshots"].get(trajectory_id, []))
+            if not selected_snapshot_set or snapshot_id in selected_snapshot_set
+        ]
+        if not trajectory_snapshot_ids:
+            trajectory_snapshot_ids = list(memory_index["trajectory_to_snapshots"].get(trajectory_id, []))
+        source_message_ids = sorted(
+            {
+                message_id
+                for snapshot_id in trajectory_snapshot_ids
+                for message_id in list(memory_index["snapshot_source_message_ids"].get(snapshot_id, []))
+                if message_id in final_source_message_ids
+            }
+        )
+        source_refs = sorted(
+            {
+                str(memory_index["raw_messages_by_id"][message_id].get("source_ref") or "")
+                for message_id in source_message_ids
+                if message_id in memory_index["raw_messages_by_id"]
+                and str(memory_index["raw_messages_by_id"][message_id].get("source_ref") or "")
+            }
+        )
+        source_token_estimate = sum(
+            estimate_context_tokens(memory_index["raw_messages_by_id"].get(message_id, {}).get("content", ""))
+            for message_id in source_message_ids
+        )
+        snapshot_token_estimate = sum(
+            estimate_context_tokens(memory_index["snapshot_texts"].get(snapshot_id, ""))
+            for snapshot_id in trajectory_snapshot_ids
+        )
+        rows.append(
+            {
+                "rank": rank,
+                "item_id": trajectory_id,
+                "item_type": "trajectory",
+                "trajectory_id": trajectory_id,
+                "linked_trajectory_ids": [trajectory_id],
+                "trajectory_ids": [trajectory_id],
+                "selected_snapshot_ids": trajectory_snapshot_ids,
+                "source_refs": source_refs,
+                "source_message_ids": source_message_ids,
+                "estimated_tokens": source_token_estimate or snapshot_token_estimate,
+            }
+        )
+
+    if not rows:
+        rows = _source_rows_for_messages(event.get("source_message_ids") or [], memory_index)
+
+    metadata = dict(event.get("metadata") or {})
+    candidate_ids = [
+        str(item)
+        for item in list(
+            metadata.get("trajectory_candidate_input_ids")
+            or metadata.get("candidate_trajectory_ids")
+            or metadata.get("ablation_trajectory_candidate_ids_v1")
+            or []
+        )
+        if str(item).strip()
+    ]
+    total = len(candidate_ids) if candidate_ids else len(rows)
+    return rows, total
 
 
 def _direct_rows(
@@ -301,7 +389,11 @@ def _flat_raw_rows(
         if score <= 0:
             score = 0.001
         source_ref = str(message.get("source_ref") or "")
-        trajectory_ids = sorted(memory_index["source_ref_to_trajectories"].get(source_ref, set()))
+        trajectory_ids = trajectory_ids_for_source_ref(
+            memory_index,
+            sample_id=sample_id,
+            source_ref=source_ref,
+        )
         scored.append(
             (
                 score,
@@ -334,12 +426,13 @@ def _snapshot_depth_rows(
     rows: list[dict[str, Any]] = []
     rank = 1
     selected_trajectories = [str(item) for item in list(event.get("trajectory_ids") or []) if str(item).strip()]
-    for trajectory_id in selected_trajectories:
+    for trajectory_rank, trajectory_id in enumerate(selected_trajectories, start=1):
         snapshot_ids = list(memory_index["trajectory_to_snapshots"].get(trajectory_id, []))[-depth:]
         for snapshot_id in snapshot_ids:
             rows.append(
                 {
                     "rank": rank,
+                    "trajectory_rank": trajectory_rank,
                     "item_id": snapshot_id,
                     "item_type": "snapshot",
                     "selected_snapshot_ids": [snapshot_id],
@@ -390,8 +483,8 @@ def _rows_for_variant(
     rank_limit: int,
 ) -> tuple[list[dict[str, Any]], int, dict[str, Any]]:
     if variant == "full":
-        rows = _full_rows(event, memory_index)
-        return rows, len(rows), {"counterfactual_observability": "observed_full_run"}
+        rows, total = _full_rows(event, memory_index)
+        return rows, total, {"counterfactual_observability": "observed_full_run"}
     if variant == "no_wiki_direct":
         rows, total = _direct_rows(row, event, memory_index, rank_limit=rank_limit)
         return rows, total, {"counterfactual_observability": "metadata_direct_retrieval"}
@@ -491,7 +584,22 @@ def build_offline_ablation_rows(
                 rank_limit=max_rank_limit,
             )
             for rank_cutoff in rank_cutoffs:
-                cutoff_rows = base_rows[:rank_cutoff]
+                if variant.startswith("snapshot_m"):
+                    cutoff_rows = [
+                        item
+                        for item in base_rows
+                        if int(item.get("trajectory_rank") or 0) <= rank_cutoff
+                    ]
+                    rank_unit = "trajectory"
+                    rank_cutoff_applied = True
+                elif variant == "flat_raw":
+                    cutoff_rows = base_rows
+                    rank_unit = "budget_only"
+                    rank_cutoff_applied = False
+                else:
+                    cutoff_rows = base_rows[:rank_cutoff]
+                    rank_unit = "item"
+                    rank_cutoff_applied = True
                 for budget in budgets:
                     selected_rows = select_ranked_rows_with_budget(cutoff_rows, budget_tokens=budget)
                     selected = _selected_payload(selected_rows, memory_index)
@@ -500,22 +608,47 @@ def build_offline_ablation_rows(
                         selected_source_refs=selected["selected_source_refs"],
                         selected_trajectory_ids=selected["selected_trajectory_ids"],
                     )
+                    if variant == "wiki_only":
+                        coverage.update(
+                            {
+                                "gold_ref_coverage": None,
+                                "gold_ref_coverage_count": None,
+                                "all_gold_refs": None,
+                                "covered_gold_source_refs": [],
+                                "wiki_linked_gold_trajectory_coverage": coverage[
+                                    "gold_trajectory_recall"
+                                ],
+                            }
+                        )
                     metrics = dict(sample_row.get("metrics") or {})
                     observed = variant == "full"
+                    unsupported_risk = (
+                        None
+                        if variant == "wiki_only"
+                        else coverage["all_gold_refs"] is not True
+                    )
+                    answerability_proxy = (
+                        coverage["gold_trajectory_recall"]
+                        if variant == "wiki_only"
+                        else coverage["gold_ref_coverage"]
+                    )
                     output.append(
                         {
-                            "schema_version": "offline_ablation_row_v1",
+                            "schema_version": "offline_ablation_row_v2",
+                            "contains_sensitive_text": True,
                             "variant": variant,
                             "sample_id": sample_row.get("sample_id"),
                             "query_task_id": query_task_id,
                             "question": sample_row.get("question"),
                             "candidate_universe_size": candidate_universe_size,
                             "rank_cutoff": rank_cutoff,
+                            "rank_unit": rank_unit,
+                            "rank_cutoff_applied": rank_cutoff_applied,
                             "budget_tokens": budget,
                             **selected,
                             **coverage,
-                            "unsupported_evidence_risk": coverage["all_gold_refs"] is not True,
-                            "answerability_proxy": coverage["gold_ref_coverage"],
+                            "unsupported_evidence_risk": unsupported_risk,
+                            "answerability_proxy": answerability_proxy,
                             "observed_answer_judge_acc": metrics.get("judge_acc") if observed else None,
                             "observed_answer_f1": metrics.get("F1") if observed else None,
                             "observed_answer_available": observed,
@@ -544,6 +677,10 @@ def _summary_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             grouped[(str(row.get("variant")), int(row.get("budget_tokens") or 0))].append(row)
     output: list[dict[str, Any]] = []
     for (variant, budget), group in sorted(grouped.items()):
+        ref_observable = [row for row in group if row.get("all_gold_refs") is not None]
+        risk_observable = [
+            row for row in group if row.get("unsupported_evidence_risk") is not None
+        ]
         output.append(
             {
                 "variant": variant,
@@ -551,8 +688,8 @@ def _summary_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "mean_gold_ref_coverage": _safe_mean(row.get("gold_ref_coverage") for row in group),
                 "mean_gold_trajectory_recall@15": _safe_mean(row.get("gold_trajectory_recall") for row in group),
                 "all_gold_refs_rate": _safe_rate(
-                    sum(1 for row in group if row.get("all_gold_refs") is True),
-                    len(group),
+                    sum(1 for row in ref_observable if row.get("all_gold_refs") is True),
+                    len(ref_observable),
                 ),
                 "all_gold_trajectories@15_rate": _safe_rate(
                     sum(1 for row in group if row.get("all_gold_trajectories") is True),
@@ -561,8 +698,12 @@ def _summary_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "mean_candidate_universe_size": _safe_mean(row.get("candidate_universe_size") for row in group),
                 "mean_estimated_context_tokens": _safe_mean(row.get("estimated_context_tokens") for row in group),
                 "unsupported_evidence_risk_rate": _safe_rate(
-                    sum(1 for row in group if row.get("unsupported_evidence_risk") is True),
-                    len(group),
+                    sum(
+                        1
+                        for row in risk_observable
+                        if row.get("unsupported_evidence_risk") is True
+                    ),
+                    len(risk_observable),
                 ),
                 "observed_judge_acc_if_available": _safe_mean(
                     row.get("observed_answer_judge_acc") for row in group
@@ -700,6 +841,7 @@ def analyze_offline_ablation(
     variants: str | Iterable[str] | None = None,
     budgets: str | Iterable[int] | None = None,
     rank_cutoffs: str | Iterable[int] | None = None,
+    sampling_manifest_path: Path | str | None = None,
 ) -> dict[str, Any]:
     run_dir = Path(run_path).expanduser().resolve()
     if run_dir.is_file():
@@ -707,11 +849,26 @@ def analyze_offline_ablation(
     run_meta, sample_rows, database_path = load_details_rows(run_dir)
     if str(run_meta.get("dataset")).lower() != "locomo":
         raise ValueError("Offline ablation currently supports LOCOMO runs only.")
+    all_sample_rows = sample_rows
+    scope = load_query_scope(sampling_manifest_path)
+    if scope is not None:
+        validate_scope_against_rows(
+            scope,
+            all_sample_rows,
+            run_dir=run_dir,
+        )
+        sample_rows = filter_query_rows(all_sample_rows, scope)
     selected_variants = parse_str_list(variants, DEFAULT_VARIANTS)
     selected_budgets = parse_int_list(budgets, DEFAULT_BUDGETS)
     selected_cutoffs = parse_int_list(rank_cutoffs, DEFAULT_CUTOFFS)
     memory_index = build_memory_index(database_path)
-    gold_rows = load_or_build_gold_labels(run_dir, sample_rows, memory_index)
+    gold_rows = load_or_build_gold_labels(run_dir, all_sample_rows, memory_index)
+    gold_rows = filter_query_rows(gold_rows, scope)
+    gold_labels_path = (
+        run_dir / "analysis_v2" / "gold_labels.jsonl"
+        if (run_dir / "analysis_v2" / "gold_labels.jsonl").exists()
+        else run_dir / "analysis" / "gold_labels.jsonl"
+    )
     retrieval_events = _load_retrieval_events(database_path, memory_index)
     rows = build_offline_ablation_rows(
         sample_rows=sample_rows,
@@ -732,7 +889,15 @@ def analyze_offline_ablation(
     )
     examples = _variant_examples(rows)
 
-    analysis_dir = run_dir / "analysis"
+    analysis_dir = (
+        scoped_analysis_dir(run_dir, scope)
+        if scope is not None
+        else versioned_analysis_path(
+            run_dir,
+            filename="offline_ablation_rows.jsonl",
+            accepted_schema_versions={"offline_ablation_row_v2"},
+        ).parent
+    )
     for path in [
         analysis_dir / "offline_ablation_rows.jsonl",
         analysis_dir / "variant_examples.jsonl",
@@ -744,13 +909,14 @@ def analyze_offline_ablation(
     write_json(
         analysis_dir / "offline_ablation_summary.json",
         {
-            "schema_version": "offline_ablation_summary_v1",
+            "schema_version": "offline_ablation_summary_v2",
             "diagnostic_mode": "offline_counterfactual_retrieval_context_ablation",
             "run_id": run_meta.get("run_id"),
             "variants": selected_variants,
             "budgets": selected_budgets,
             "rank_cutoffs": selected_cutoffs,
             "token_estimator": TOKEN_ESTIMATOR_NAME,
+            "sampling_scope": scope.metadata() if scope is not None else None,
             "table": summary_table,
             "paths": {
                 "rows": str(analysis_dir / "offline_ablation_rows.jsonl"),
@@ -758,7 +924,7 @@ def analyze_offline_ablation(
                 "cost_recall_curve": str(analysis_dir / "cost_recall_curve.csv"),
                 "evidence_funnel": str(analysis_dir / "evidence_funnel.csv"),
                 "variant_examples": str(analysis_dir / "variant_examples.jsonl"),
-                "gold_labels": str(analysis_dir / "gold_labels.jsonl"),
+                "gold_labels": str(gold_labels_path),
             },
         },
     )
@@ -799,10 +965,11 @@ def analyze_offline_ablation(
         ["stage", "query_count", "hit_count", "hit_rate"],
     )
     return {
-        "schema_version": "offline_ablation_report_v1",
+        "schema_version": "offline_ablation_report_v2",
         "run_dir": str(run_dir),
         "analysis_dir": str(analysis_dir),
         "query_count": len(sample_rows),
+        "sampling_scope": scope.metadata() if scope is not None else None,
         "row_count": len(rows),
         "summary_path": str(analysis_dir / "offline_ablation_summary.json"),
         "table_path": str(analysis_dir / "offline_ablation_table.csv"),

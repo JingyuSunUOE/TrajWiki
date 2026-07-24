@@ -60,7 +60,7 @@ def test_offline_ablation_artifacts_are_generated_from_mock_locomo_run(tmp_path:
     gold_path = run_dir / "analysis" / "gold_labels.jsonl"
     assert gold_path.exists()
     gold_rows = [json.loads(line) for line in gold_path.read_text(encoding="utf-8").splitlines() if line]
-    assert gold_rows[0]["schema_version"] == "gold_labels_v1"
+    assert gold_rows[0]["schema_version"] == "gold_labels_v2"
 
     details = json.loads((run_dir / "details.json").read_text(encoding="utf-8"))
     retrieval_diagnostics = details["samples"][0]["metadata"]["retrieval_compact_diagnostics"]

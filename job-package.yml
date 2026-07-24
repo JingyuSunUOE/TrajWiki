@@ -1,0 +1,72 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+    generateName: trajwiki-rebuttal-package-
+    labels:
+        kueue.x-k8s.io/queue-name: eidf098ns-user-queue
+        trajwiki.org/workflow: WORKFLOW_ID
+        trajwiki.org/mode: package
+        trajwiki.org/image-source: IMAGE_SOURCE
+spec:
+    backoffLimit: 0
+    activeDeadlineSeconds: 21600
+    parallelism: 1
+    completions: 1
+    template:
+        metadata:
+            name: trajwiki-rebuttal-package
+            labels:
+                trajwiki.org/workflow: WORKFLOW_ID
+                trajwiki.org/mode: package
+                trajwiki.org/image-source: IMAGE_SOURCE
+        spec:
+            containers:
+            - name: traj
+              image: jingyusun/traj:latest
+              terminationMessagePath: "/tmp/my-log"
+              imagePullPolicy: "Always"
+              command: [ "/opt/trajwiki/scripts/run_rebuttal_answer_ablation.sh" ]
+              args: [ "package" ]
+              env:
+                    - name: TRAJWIKI_WORKFLOW_ID
+                      value: "WORKFLOW_ID"
+                    - name: TRAJWIKI_IMAGE_REF
+                      value: "IMAGE_REF_VALUE"
+                    - name: TRAJWIKI_PROJECT_DIR
+                      value: "PROJECT_DIR_VALUE"
+                    - name: TRAJWIKI_REBUTTAL_PRIVATE_DIR
+                      value: "PRIVATE_DIR_VALUE"
+                    - name: TRAJWIKI_BUNDLE_PATH
+                      value: "BUNDLE_PATH_VALUE"
+                    - name: TRAJWIKI_RUN_DIR
+                      value: "RUN_DIR_VALUE"
+                    - name: TRAJWIKI_MEM0_SOURCE
+                      value: "MEM0_SOURCE_VALUE"
+                    - name: TRAJWIKI_PARENT_60_EXPERIMENT
+                      value: "PARENT_60_VALUE"
+              resources:
+                    requests:
+                        cpu: 8
+                        memory: '64Gi'
+                    limits:
+                        cpu: 8
+                        memory: '64Gi'
+              volumeMounts:
+                    - mountPath: /dev/shm
+                      name: dshm
+                    - mountPath: /data
+                      name: test-nfs
+            restartPolicy: Never
+            securityContext:
+              runAsUser: 35761
+              runAsGroup: 4451
+              runAsNonRoot: true
+            volumes:
+            - emptyDir:
+                medium: Memory
+                sizeLimit: 32Gi
+              name: dshm
+            - name: test-nfs
+              nfs:
+                  server: 10.24.6.66
+                  path: /

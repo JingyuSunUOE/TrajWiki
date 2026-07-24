@@ -1,0 +1,11 @@
+# The image installs dependencies and the TrajWiki source only. Runtime datasets,
+# secrets, completed runs, and local research archives stay on the mounted NFS.
+**
+!Dockerfile
+!.dockerignore
+!pyproject.toml
+!README.md
+!src/
+!src/**
+!scripts/
+!scripts/**

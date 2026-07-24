@@ -92,6 +92,30 @@ def test_openai_compatible_generate_calls_chat_completions_and_records_usage():
     assert response.metadata["openai_compatible_base_url"] == "http://localhost:8000/v1"
 
 
+def test_openai_compatible_generate_forwards_experiment_generation_controls():
+    completions = _FakeCompletions()
+    provider = OpenAICompatibleProvider(
+        "qwen3-8b",
+        client=_FakeClient(completions),
+    )
+
+    response = provider.generate(
+        [NormalizedMessage(role="user", content="hello", turn_index=0)],
+        metadata={
+            "generation_temperature": 0.25,
+            "generation_seed": 7,
+            "generation_max_tokens": 512,
+        },
+    )
+
+    assert completions.calls[0]["temperature"] == 0.25
+    assert completions.calls[0]["seed"] == 7
+    assert completions.calls[0]["max_tokens"] == 512
+    assert response.metadata["generation_temperature_requested"] == 0.25
+    assert response.metadata["generation_seed_requested"] == 7
+    assert response.metadata["generation_max_tokens_requested"] == 512
+
+
 def test_openai_compatible_vllm_guided_json_request_parses_payload():
     completions = _FakeCompletions(responses=[_episodic_response()])
     provider = OpenAICompatibleProvider("qwen3-8b", client=_FakeClient(completions))

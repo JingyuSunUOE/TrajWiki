@@ -7,7 +7,6 @@ from typing import Any
 
 from trajpatch.providers.metering import phase_for_task
 
-
 CostPhase = str
 DeploymentScope = str
 ReusableScope = str
@@ -111,8 +110,8 @@ def lookup_model_price(model: str, price_config: dict[str, Any] | None) -> dict[
 
 
 def estimate_dollar_cost(
-    prompt_tokens: int | float,
-    completion_tokens: int | float,
+    prompt_tokens: int | float | None,
+    completion_tokens: int | float | None,
     model: str,
     price_config: dict[str, Any] | None,
 ) -> dict[str, Any]:
@@ -125,6 +124,7 @@ def estimate_dollar_cost(
             "total_cost": None,
             "currency": currency,
             "price_available": False,
+            "usage_available": prompt_tokens is not None and completion_tokens is not None,
         }
     input_price = price.get("input_per_1m_tokens")
     output_price = price.get("output_per_1m_tokens")
@@ -135,6 +135,16 @@ def estimate_dollar_cost(
             "total_cost": None,
             "currency": currency,
             "price_available": False,
+            "usage_available": prompt_tokens is not None and completion_tokens is not None,
+        }
+    if prompt_tokens is None or completion_tokens is None:
+        return {
+            "input_cost": None,
+            "output_cost": None,
+            "total_cost": None,
+            "currency": currency,
+            "price_available": True,
+            "usage_available": False,
         }
     input_cost = float(prompt_tokens) * float(input_price) / 1_000_000.0
     output_cost = float(completion_tokens) * float(output_price) / 1_000_000.0
@@ -144,6 +154,7 @@ def estimate_dollar_cost(
         "total_cost": input_cost + output_cost,
         "currency": currency,
         "price_available": True,
+        "usage_available": True,
     }
 
 
@@ -154,6 +165,9 @@ def break_even_queries(upfront_delta: float, per_query_saving: float) -> dict[st
             "reason": "no_query_cost_saving",
         }
     return {
-        "break_even_queries": max(0, int(math.ceil(float(upfront_delta) / float(per_query_saving)))),
+        "break_even_queries": max(
+            0,
+            math.ceil(float(upfront_delta) / float(per_query_saving)),
+        ),
         "reason": "positive_query_cost_saving",
     }

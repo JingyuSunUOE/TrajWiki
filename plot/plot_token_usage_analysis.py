@@ -11,13 +11,22 @@ from typing import Any
 os.environ.setdefault("MPLCONFIGDIR", str(Path(tempfile.gettempdir()) / "trajpatch-mpl-cache"))
 os.environ.setdefault("XDG_CACHE_HOME", str(Path(tempfile.gettempdir()) / "trajpatch-cache"))
 
-import matplotlib  # noqa: E402
+import matplotlib
 
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt  # noqa: E402
-
+import matplotlib.pyplot as plt
 
 VALID_METRICS = {"total_tokens", "prompt_tokens", "completion_tokens"}
+SOURCE_MODES = {"auto", "cost-phase", "summary-task"}
+
+PHASE_DISPLAY_NAMES = {
+    "answer_generation": "Answer generation",
+    "evaluation_only": "Benchmark evaluation",
+    "memory_build": "Memory construction",
+    "query_time": "Query-time retrieval",
+    "repair_validation": "Repair/validation",
+    "unknown": "Unknown",
+}
 
 TASK_DISPLAY_NAMES = {
     "answer_count_validation": "Count validation",
@@ -62,9 +71,16 @@ def load_json(path: Path) -> dict[str, Any]:
 def write_csv(path: Path, rows: list[dict[str, Any]], fieldnames: list[str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
         writer.writerows(rows)
+
+
+def load_csv_rows(path: Path) -> list[dict[str, str]]:
+    if not path.exists():
+        return []
+    with path.open(encoding="utf-8", newline="") as handle:
+        return list(csv.DictReader(handle))
 
 
 def _number(value: Any) -> float:
@@ -90,6 +106,53 @@ def display_task_name(task: str) -> str:
     if task == "Other":
         return "Other tasks"
     return TASK_DISPLAY_NAMES.get(task, task.replace("_", " ").capitalize())
+
+
+def display_phase_name(phase: str) -> str:
+    if phase == "Other":
+        return "Other phases"
+    return PHASE_DISPLAY_NAMES.get(phase, phase.replace("_", " ").capitalize())
+
+
+def phase_token_rows(run_path: Path, *, metric: str = "total_tokens") -> list[dict[str, Any]]:
+    if metric not in VALID_METRICS:
+        raise ValueError(f"Unsupported metric: {metric}")
+    csv_rows = load_csv_rows(run_path / "analysis" / "cost_phase_summary.csv")
+    if not csv_rows:
+        return []
+
+    grouped: dict[str, dict[str, Any]] = {}
+    for row in csv_rows:
+        phase = str(row.get("cost_phase") or "unknown")
+        bucket = grouped.setdefault(
+            phase,
+            {
+                "task": phase,
+                "display_task": display_phase_name(phase),
+                "prompt_tokens": 0.0,
+                "completion_tokens": 0.0,
+                "total_tokens": 0.0,
+                "provider_call_count": 0.0,
+                "latency_ms": 0.0,
+                "metric_tokens": 0.0,
+                "token_share": 0.0,
+                "is_grouped_other": False,
+                "source": "cost_phase_summary",
+            },
+        )
+        bucket["prompt_tokens"] += _number(float(row.get("prompt_tokens") or 0.0))
+        bucket["completion_tokens"] += _number(float(row.get("completion_tokens") or 0.0))
+        bucket["total_tokens"] += _number(float(row.get("total_tokens") or 0.0))
+        bucket["provider_call_count"] += _number(float(row.get("provider_call_rows") or 0.0))
+        bucket["latency_ms"] += _number(float(row.get("latency_ms") or 0.0))
+
+    raw_rows = list(grouped.values())
+    for row in raw_rows:
+        row["metric_tokens"] = _token_value(row, metric)
+    total_metric_tokens = sum(row["metric_tokens"] for row in raw_rows)
+    for row in raw_rows:
+        row["token_share"] = row["metric_tokens"] / total_metric_tokens if total_metric_tokens else 0.0
+    return sorted(raw_rows, key=lambda row: (-float(row["metric_tokens"]), str(row["task"])))
 
 
 def task_token_rows(summary: dict[str, Any], *, metric: str = "total_tokens") -> list[dict[str, Any]]:
@@ -119,6 +182,7 @@ def task_token_rows(summary: dict[str, Any], *, metric: str = "total_tokens") ->
                 "metric_tokens": metric_tokens,
                 "token_share": 0.0,
                 "is_grouped_other": False,
+                "source": "summary_llm_call_diagnostics",
             }
         )
 
@@ -221,7 +285,7 @@ def plot_token_pie(
         handlelength=1.1,
         handletextpad=0.45,
     )
-    fig.tight_layout(rect=(0.0, 0.25, 1.0, 1.0))
+    fig.tight_layout(rect=(0.0, 0.16, 1.0, 1.0))
     fig.savefig(output_base.with_suffix(".pdf"), bbox_inches="tight")
     fig.savefig(output_base.with_suffix(".png"), dpi=300, bbox_inches="tight")
     plt.close(fig)
@@ -234,9 +298,12 @@ def run(
     top_n: int = 12,
     metric: str = "total_tokens",
     title: str = "Token Usage by Task",
+    source: str = "auto",
 ) -> dict[str, Any]:
     if metric not in VALID_METRICS:
         raise ValueError(f"Unsupported metric: {metric}")
+    if source not in SOURCE_MODES:
+        raise ValueError(f"Unsupported source: {source}")
     if top_n < 1:
         raise ValueError("top_n must be >= 1")
 
@@ -245,11 +312,22 @@ def run(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     summary = load_json(run_path / "summary.json")
-    rows = task_token_rows(summary, metric=metric)
+    selected_source = source
+    rows: list[dict[str, Any]] = []
+    if source in {"auto", "cost-phase"}:
+        rows = phase_token_rows(run_path, metric=metric)
+        if rows:
+            selected_source = "cost-phase"
+        elif source == "cost-phase":
+            raise FileNotFoundError(f"Could not read cost phase summary under {run_path / 'analysis'}")
+    if not rows:
+        rows = task_token_rows(summary, metric=metric)
+        selected_source = "summary-task"
     pie_rows = grouped_pie_rows(rows, top_n=top_n)
+    output_stem = "token_usage_by_cost_phase" if selected_source == "cost-phase" else "token_usage_by_task"
 
     write_csv(
-        output_dir / "token_usage_by_task.csv",
+        output_dir / f"{output_stem}.csv",
         rows,
         [
             "task",
@@ -262,11 +340,12 @@ def run(
             "metric_tokens",
             "token_share",
             "is_grouped_other",
+            "source",
         ],
     )
     plot_token_pie(
         pie_rows,
-        output_base=output_dir / "token_usage_by_task_pie",
+        output_base=output_dir / f"{output_stem}_pie",
         metric=metric,
         title=title,
     )
@@ -277,6 +356,7 @@ def run(
         "run_path": str(run_path),
         "run_id": summary.get("run_meta", {}).get("run_id") or run_path.name,
         "metric": metric,
+        "source": selected_source,
         "top_n": top_n,
         "task_count": len(rows),
         "total_metric_tokens": sum(float(row["metric_tokens"]) for row in rows),
@@ -291,9 +371,9 @@ def run(
         ],
         "other": other_row,
         "outputs": {
-            "token_usage_pie_pdf": str((output_dir / "token_usage_by_task_pie.pdf").resolve()),
-            "token_usage_pie_png": str((output_dir / "token_usage_by_task_pie.png").resolve()),
-            "token_usage_csv": str((output_dir / "token_usage_by_task.csv").resolve()),
+            "token_usage_pie_pdf": str((output_dir / f"{output_stem}_pie.pdf").resolve()),
+            "token_usage_pie_png": str((output_dir / f"{output_stem}_pie.png").resolve()),
+            "token_usage_csv": str((output_dir / f"{output_stem}.csv").resolve()),
         },
     }
     (output_dir / "token_usage_analysis_summary.json").write_text(
@@ -309,6 +389,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--output-dir", default=Path("plot"), type=Path)
     parser.add_argument("--top-n", default=12, type=int)
     parser.add_argument("--metric", default="total_tokens", choices=sorted(VALID_METRICS))
+    parser.add_argument("--source", default="auto", choices=sorted(SOURCE_MODES))
     parser.add_argument("--title", default="Token Usage by Task")
     args = parser.parse_args(argv)
     summary = run(
@@ -317,6 +398,7 @@ def main(argv: list[str] | None = None) -> None:
         top_n=args.top_n,
         metric=args.metric,
         title=args.title,
+        source=args.source,
     )
     print(json.dumps(summary["outputs"], indent=2, sort_keys=True))
 

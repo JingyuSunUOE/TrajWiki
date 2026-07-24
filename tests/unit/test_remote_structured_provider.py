@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import sys
+from types import SimpleNamespace
 
 import pytest
 
-from trajpatch.providers.litellm_provider import LiteLLMProvider
 from trajpatch.providers.base import LLMProvider
+from trajpatch.providers.litellm_provider import LiteLLMProvider
 from trajpatch.providers.metering import MeteredLLMProvider
 from trajpatch.providers.structured_outputs import (
     get_structured_task_spec,
@@ -66,6 +68,48 @@ def _contains_key(value: object, key: str) -> bool:
     if isinstance(value, list):
         return any(_contains_key(child, key) for child in value)
     return False
+
+
+def test_litellm_generate_forwards_experiment_generation_controls(monkeypatch):
+    calls: list[dict] = []
+
+    def fake_completion(**kwargs):
+        calls.append(kwargs)
+        return {
+            "id": "response-1",
+            "model": "gpt-4o-mini",
+            "choices": [
+                {
+                    "message": {"content": "answer"},
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {"prompt_tokens": 4, "completion_tokens": 1},
+        }
+
+    monkeypatch.setitem(
+        sys.modules,
+        "litellm",
+        SimpleNamespace(completion=fake_completion),
+    )
+    provider = LiteLLMProvider("gpt-4o-mini")
+
+    response = provider.generate(
+        [NormalizedMessage(role="user", content="Question?", turn_index=0)],
+        metadata={
+            "generation_temperature": 0.0,
+            "generation_seed": 7,
+            "generation_max_tokens": 512,
+        },
+    )
+
+    assert calls[0]["temperature"] == 0.0
+    assert calls[0]["seed"] == 7
+    assert calls[0]["drop_params"] is True
+    assert calls[0]["max_tokens"] == 512
+    assert response.metadata["generation_temperature_requested"] == 0.0
+    assert response.metadata["generation_seed_requested"] == 7
+    assert response.metadata["generation_max_tokens_requested"] == 512
 
 
 def test_claim_stage_openai_schemas_are_strict_and_do_not_leak_gemini_keywords():
@@ -339,14 +383,19 @@ def test_anthropic_structured_uses_tool_schema(monkeypatch):
     calls: list[dict] = []
 
     class FakeAnthropicResponse:
-        usage = type("Usage", (), {"input_tokens": 9, "output_tokens": 3})()
-        content = [
-            {
-                "type": "tool_use",
-                "name": "trajpatch_locomo_judge",
-                "input": {"verdict": "CORRECT"},
-            }
-        ]
+        def __init__(self) -> None:
+            self.usage = type(
+                "Usage",
+                (),
+                {"input_tokens": 9, "output_tokens": 3},
+            )()
+            self.content = [
+                {
+                    "type": "tool_use",
+                    "name": "trajpatch_locomo_judge",
+                    "input": {"verdict": "CORRECT"},
+                }
+            ]
 
     class FakeMessages:
         def create(self, **kwargs):

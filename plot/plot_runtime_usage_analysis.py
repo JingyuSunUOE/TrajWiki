@@ -11,13 +11,22 @@ from typing import Any
 os.environ.setdefault("MPLCONFIGDIR", str(Path(tempfile.gettempdir()) / "trajpatch-mpl-cache"))
 os.environ.setdefault("XDG_CACHE_HOME", str(Path(tempfile.gettempdir()) / "trajpatch-cache"))
 
-import matplotlib  # noqa: E402
+import matplotlib
 
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt  # noqa: E402
-
+import matplotlib.pyplot as plt
 
 TIME_UNITS = {"auto", "seconds", "minutes", "hours"}
+SOURCE_MODES = {"auto", "cost-phase", "summary-task"}
+
+PHASE_DISPLAY_NAMES = {
+    "answer_generation": "Answer generation",
+    "evaluation_only": "Benchmark evaluation",
+    "memory_build": "Memory construction",
+    "query_time": "Query-time retrieval",
+    "repair_validation": "Repair/validation",
+    "unknown": "Unknown",
+}
 
 TASK_DISPLAY_NAMES = {
     "answer_count_validation": "Count validation",
@@ -62,9 +71,16 @@ def load_json(path: Path) -> dict[str, Any]:
 def write_csv(path: Path, rows: list[dict[str, Any]], fieldnames: list[str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
         writer.writerows(rows)
+
+
+def load_csv_rows(path: Path) -> list[dict[str, str]]:
+    if not path.exists():
+        return []
+    with path.open(encoding="utf-8", newline="") as handle:
+        return list(csv.DictReader(handle))
 
 
 def _number(value: Any) -> float:
@@ -79,6 +95,50 @@ def display_task_name(task: str) -> str:
     if task == "Other":
         return "Other tasks"
     return TASK_DISPLAY_NAMES.get(task, task.replace("_", " ").capitalize())
+
+
+def display_phase_name(phase: str) -> str:
+    if phase == "Other":
+        return "Other phases"
+    return PHASE_DISPLAY_NAMES.get(phase, phase.replace("_", " ").capitalize())
+
+
+def phase_runtime_rows(run_path: Path) -> list[dict[str, Any]]:
+    csv_rows = load_csv_rows(run_path / "analysis" / "cost_phase_summary.csv")
+    if not csv_rows:
+        return []
+
+    grouped: dict[str, dict[str, Any]] = {}
+    for row in csv_rows:
+        phase = str(row.get("cost_phase") or "unknown")
+        bucket = grouped.setdefault(
+            phase,
+            {
+                "task": phase,
+                "display_task": display_phase_name(phase),
+                "latency_ms": 0.0,
+                "latency_seconds": 0.0,
+                "latency_minutes": 0.0,
+                "latency_hours": 0.0,
+                "provider_call_count": 0.0,
+                "total_tokens": 0.0,
+                "runtime_share": 0.0,
+                "is_grouped_other": False,
+                "source": "cost_phase_summary",
+            },
+        )
+        bucket["latency_ms"] += _number(float(row.get("latency_ms") or 0.0))
+        bucket["provider_call_count"] += _number(float(row.get("provider_call_rows") or 0.0))
+        bucket["total_tokens"] += _number(float(row.get("total_tokens") or 0.0))
+
+    raw_rows = list(grouped.values())
+    total_latency_ms = sum(row["latency_ms"] for row in raw_rows)
+    for row in raw_rows:
+        row["latency_seconds"] = row["latency_ms"] / 1000
+        row["latency_minutes"] = row["latency_ms"] / 60_000
+        row["latency_hours"] = row["latency_ms"] / 3_600_000
+        row["runtime_share"] = row["latency_ms"] / total_latency_ms if total_latency_ms else 0.0
+    return sorted(raw_rows, key=lambda row: (-float(row["latency_ms"]), str(row["task"])))
 
 
 def _time_unit_for_seconds(seconds: float, requested: str) -> str:
@@ -131,6 +191,7 @@ def task_runtime_rows(summary: dict[str, Any]) -> list[dict[str, Any]]:
                 "total_tokens": _number(stats.get("total_tokens")),
                 "runtime_share": 0.0,
                 "is_grouped_other": False,
+                "source": "summary_llm_call_diagnostics",
             }
         )
 
@@ -223,7 +284,7 @@ def plot_runtime_pie(
         handlelength=1.1,
         handletextpad=0.45,
     )
-    fig.tight_layout(rect=(0.0, 0.25, 1.0, 1.0))
+    fig.tight_layout(rect=(0.0, 0.16, 1.0, 1.0))
     fig.savefig(output_base.with_suffix(".pdf"), bbox_inches="tight")
     fig.savefig(output_base.with_suffix(".png"), dpi=300, bbox_inches="tight")
     plt.close(fig)
@@ -236,9 +297,12 @@ def run(
     top_n: int = 12,
     time_unit: str = "auto",
     title: str = "Runtime by Task",
+    source: str = "auto",
 ) -> dict[str, Any]:
     if time_unit not in TIME_UNITS:
         raise ValueError(f"Unsupported time unit: {time_unit}")
+    if source not in SOURCE_MODES:
+        raise ValueError(f"Unsupported source: {source}")
     if top_n < 1:
         raise ValueError("top_n must be >= 1")
 
@@ -247,11 +311,22 @@ def run(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     summary = load_json(run_path / "summary.json")
-    rows = task_runtime_rows(summary)
+    selected_source = source
+    rows: list[dict[str, Any]] = []
+    if source in {"auto", "cost-phase"}:
+        rows = phase_runtime_rows(run_path)
+        if rows:
+            selected_source = "cost-phase"
+        elif source == "cost-phase":
+            raise FileNotFoundError(f"Could not read cost phase summary under {run_path / 'analysis'}")
+    if not rows:
+        rows = task_runtime_rows(summary)
+        selected_source = "summary-task"
     pie_rows = grouped_pie_rows(rows, top_n=top_n)
+    output_stem = "runtime_usage_by_cost_phase" if selected_source == "cost-phase" else "runtime_usage_by_task"
 
     write_csv(
-        output_dir / "runtime_usage_by_task.csv",
+        output_dir / f"{output_stem}.csv",
         rows,
         [
             "task",
@@ -264,11 +339,12 @@ def run(
             "total_tokens",
             "runtime_share",
             "is_grouped_other",
+            "source",
         ],
     )
     plot_runtime_pie(
         pie_rows,
-        output_base=output_dir / "runtime_usage_by_task_pie",
+        output_base=output_dir / f"{output_stem}_pie",
         time_unit=time_unit,
         title=title,
     )
@@ -282,6 +358,7 @@ def run(
         "run_id": summary.get("run_meta", {}).get("run_id") or run_path.name,
         "top_n": top_n,
         "time_unit": time_unit,
+        "source": selected_source,
         "task_count": len(rows),
         "total_provider_latency_ms": total_provider_latency_ms,
         "total_provider_latency_seconds": total_provider_latency_ms / 1000,
@@ -297,9 +374,9 @@ def run(
         ],
         "other": other_row,
         "outputs": {
-            "runtime_usage_pie_pdf": str((output_dir / "runtime_usage_by_task_pie.pdf").resolve()),
-            "runtime_usage_pie_png": str((output_dir / "runtime_usage_by_task_pie.png").resolve()),
-            "runtime_usage_csv": str((output_dir / "runtime_usage_by_task.csv").resolve()),
+            "runtime_usage_pie_pdf": str((output_dir / f"{output_stem}_pie.pdf").resolve()),
+            "runtime_usage_pie_png": str((output_dir / f"{output_stem}_pie.png").resolve()),
+            "runtime_usage_csv": str((output_dir / f"{output_stem}.csv").resolve()),
         },
     }
     (output_dir / "runtime_usage_analysis_summary.json").write_text(
@@ -315,6 +392,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--output-dir", default=Path("plot"), type=Path)
     parser.add_argument("--top-n", default=12, type=int)
     parser.add_argument("--time-unit", default="auto", choices=sorted(TIME_UNITS))
+    parser.add_argument("--source", default="auto", choices=sorted(SOURCE_MODES))
     parser.add_argument("--title", default="Runtime by Task")
     args = parser.parse_args(argv)
     summary = run(
@@ -323,6 +401,7 @@ def main(argv: list[str] | None = None) -> None:
         top_n=args.top_n,
         time_unit=args.time_unit,
         title=args.title,
+        source=args.source,
     )
     print(json.dumps(summary["outputs"], indent=2, sort_keys=True))
 

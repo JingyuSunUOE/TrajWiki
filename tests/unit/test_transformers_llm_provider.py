@@ -379,6 +379,25 @@ def test_generation_budget_varies_by_task(metadata, expected_budget):
     assert generation_kwargs["max_new_tokens"] == expected_budget
 
 
+def test_generation_controls_override_local_defaults():
+    tokenizer = FakeChatTokenizer()
+    model = FakeModel(FakeTorchModule.tensor([[1, 2, 3, 4]]))
+    provider = _provider_with_fakes(tokenizer, model)
+    provider._sanitize_model_generation_defaults()
+
+    generation_kwargs = provider._build_generation_kwargs(
+        {
+            "task": "answer_generation",
+            "generation_max_tokens": 37,
+            "generation_temperature": 0.2,
+        }
+    )
+
+    assert generation_kwargs["max_new_tokens"] == 37
+    assert generation_kwargs["do_sample"] is True
+    assert generation_kwargs["temperature"] == 0.2
+
+
 @pytest.mark.parametrize(
     ("metadata", "expected_budget"),
     [

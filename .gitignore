@@ -2,15 +2,25 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
 *.egg-info/
+build/
+dist/
 
 # Local environments and secrets
 .env
+.env.*
+!.env.example
 .venv/
 venv/
 
 # IDE / OS metadata
 .idea/
+.vscode/
 .DS_Store
 
 # Benchmark outputs and runtime caches
@@ -20,13 +30,34 @@ output/
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal
+rebuttal_experiments/
+**/rebuttal_experiments/
+private/
+.private/
+verification_bundle*/
+*.tar.zst
+*.tar.zst.sha256
+workflow_logs/
+**/kubernetes/*.log
+**/kubernetes/*_describe.txt
 
 # Local benchmark datasets
 locomo/
 medmt/
 
+# Local copies of legacy baseline projects and their large generated datasets.
+# TrajWiki ports only the tested deterministic helpers it needs.
+locomo_eval/
+bench_datas/
+tmp/
+
 # Generated analysis plots and tables; keep plot/*.py scripts trackable.
+plot/generated*/
 plot/*.csv
 plot/*.json
 plot/*.png
 plot/*.pdf
+
+# User-supplied pricing configs; keep example templates trackable.
+configs/pricing/*.json
+!configs/pricing/*.example.json

@@ -72,6 +72,23 @@ medmt/
   information_contradiction.json
 ```
 
+### Research And Deployment Boundaries
+
+TrajWiki is a research prototype, not a clinical decision system or a compliance-ready
+personal-memory service. MedMT evaluates long-context memory behavior only; generated
+medical content must not be treated as medical advice. The reference implementation stores
+run artifacts in local files and SQLite and does not provide encryption at rest, access
+control, tenant isolation, consent management, retention policies, or HIPAA/GDPR
+certification.
+
+Append-only snapshots preserve an epistemic revision history, but they must not be
+interpreted as a requirement to retain personal data indefinitely. A production deployment
+needs an authenticated hard-deletion path that removes the affected raw messages,
+snapshots, claims, embeddings, wiki links, caches, and exported diagnostics, followed by
+index rebuilding and deletion verification. High-risk domains additionally require
+freshness checks, conflict quarantine, source verification, and human oversight before
+memory updates or answers can influence decisions.
+
 ## Installation
 
 Use Python 3.11 or newer.
@@ -348,6 +365,18 @@ PYTHONPATH=src python -m trajpatch run \
   tables from one completed LOCOMO run.
 - `analyze-auditability`: build source-support, unsupported-risk, failure-localization,
   conflict/obsolete, and audit-packet tables from one completed LOCOMO run.
+- `run-answer-ablation`: run the resumable, stratified answer-level rebuttal experiment
+  over one immutable LOCOMO memory build.
+- `analyze-answer-ablation`: rebuild answer-level tables and paired statistics without
+  new provider calls.
+- `analyze-ranking-robustness`: perturb saved deterministic retrieval weights without
+  rebuilding memory or calling an LLM.
+- `validate-run-artifacts`: check provenance scope, provider-call uniqueness, and
+  run/experiment completeness.
+- `prepare-audit-study`, `conduct-audit-study`, and `analyze-audit-study`: prepare and
+  analyze the blinded human provenance study.
+- `import-baseline-answers`: normalize saved baseline predictions for the same blinded
+  independent judge used by the answer ablation.
 
 Run any command with `--help` for the full option list.
 
@@ -532,6 +561,7 @@ analysis/unsupported_answer_table.csv
 analysis/failure_localization_table.csv
 analysis/conflict_obsolete_table.csv
 analysis/audit_packet_cost.csv
+analysis/error_propagation_funnel.csv
 analysis/audit_examples.jsonl
 analysis/direct_retrieval_ablation.json
 analysis/direct_retrieval_rows.jsonl
@@ -540,8 +570,47 @@ analysis/trajectory_drift_rows.jsonl
 analysis/trajectory_drift_query_rows.jsonl
 ```
 
+If a run already contains a legacy artifact schema, rebuilt sample-scoped diagnostics are
+written under `analysis_v2/` instead of overwriting the originals. Compact call rows use
+globally unique run/worker/role/call identifiers and include
+`cost_reconciliation.json` when cost diagnostics are enabled.
+
+Rebuttal experiments are stored separately:
+
+```text
+rebuttal_experiments/answer_ablation_<config_hash>/
+  experiment_manifest.json
+  sampling_manifest.json
+  gold_label_rows.jsonl
+  call_plan.json
+  external_baseline_manifest.json
+  retrieval_plan_rows.jsonl
+  variant_context_rows.jsonl
+  token_budget_audit.csv
+  unavailable_stage_rows.jsonl
+  contexts/<variant>/<query>.json.gz
+  jobs/generation/<variant>/<query>.json
+  jobs/judge/<variant>/<query>.json
+  answer_ablation_rows.jsonl
+  answer_ablation_table.csv
+  paired_statistics.csv
+  stage_diagnostic_statistics.csv
+  stratum_summary.csv
+  variant_cost_summary.csv
+  balanced_failure_examples.jsonl
+  integrity_report.json
+  offline_analysis/
+rebuttal_experiments/audit_study_seed<seed>_<count>/
+  audit_tasks.jsonl
+  audit_study_key.jsonl
+  audit_study_manifest.json
+  audit_labels_template.csv
+```
+
 Full prompts and raw retrieved context are intentionally not copied into compact
 diagnostics. Large text stays in controlled debug artifacts or SQLite records where needed.
+Full answer-ablation contexts and human-audit packets do contain dialogue text. Treat those
+directories as sensitive and review dataset and privacy constraints before publishing them.
 
 ## Evaluation And Analysis
 
@@ -609,7 +678,391 @@ trajwiki analyze-auditability output/remote/locomo/multi_hop/<run_id> \
 such as source-supported answer rate proxy, unsupported-answer risk, failure-localization
 distribution, deprecated-claim leakage proxy, and audit packet cost. With labels, it also
 reports accuracy/F1 for labeled conflict, obsolete-claim, failure-localization, and human
-audit fields.
+audit fields. `error_propagation_funnel.csv` additionally traces gold-source coverage from
+storage through trajectory/page retrieval, final context, and answer support. Its
+conditional correctness columns use the observed benchmark judge and are not human
+accuracy estimates.
+
+## Rebuttal 200-Query Extension Workflow
+
+The current rebuttal experiment is a **post-hoc nested extension** of the completed
+60-query pilot. It reuses the same immutable 282-query LoCoMo multi-hop memory build and
+contains every pilot query; it is not a preregistered or independent replication. The
+fixed `rebuttal_200_v1` sample uses seed 7 and selects:
+
+```text
+strict deep-history:   9 / 9
+update-sensitive:    132 / 188
+ordinary:             59 / 85
+total:               200 / 282
+```
+
+The experiment generates 11 same-model answer configurations:
+
+```text
+full
+direct_trajectory
+latest_snapshot
+hybrid_raw_rag
+wiki_summaries
+no_claim_state
+no_source_constraint
+full_context
+naive_dense_rag
+full_context_matched
+hybrid_raw_rag_matched
+```
+
+`Full Context (32K)` and `Flat Raw Memory (32K)` are upper-bound context comparisons.
+Their matched counterparts receive, query by query, no more complete-prompt tokens than
+regenerated Full TrajWiki. Full Context truncates only at complete message boundaries;
+the two Flat Raw variants share the exact same cached lexical+dense ranking. Naive Dense
+RAG uses Qwen embeddings, 384-token chunks, 64-token overlap, and top-4 retrieval.
+
+The 60-query parent experiment must be complete and use the same source hashes, models,
+prompt versions, tokenizer, budgets, RAG settings, generation seed, and imported Mem0
+answers. `--reuse-policy require` verifies every reusable generation and judge job,
+including its prompt SHA, before any API call. Parent attachment is separate from the
+core experiment hash.
+
+```bash
+trajwiki run-answer-ablation RUN_DIR \
+  --sample-size 200 \
+  --sampling-profile rebuttal_200_v1 \
+  --sample-seed 7 \
+  --variants full,direct_trajectory,latest_snapshot,hybrid_raw_rag,wiki_summaries,no_claim_state,no_source_constraint,full_context,naive_dense_rag,full_context_matched,hybrid_raw_rag_matched \
+  --reuse-experiment PARENT_60_EXPERIMENT \
+  --reuse-policy require \
+  --baseline-answers PRIVATE_DIR/mem0_saved.normalized.jsonl \
+  --max-total-tokens 32000 \
+  --max-output-tokens 512 \
+  --token-counter tiktoken \
+  --require-exact-token-counter \
+  --token-safety-margin 128 \
+  --rag-chunk-size 384 \
+  --rag-chunk-overlap 64 \
+  --rag-top-k 4 \
+  --backbone-provider-kind remote \
+  --backbone-model gpt-4o-mini \
+  --independent-judge-provider-kind remote \
+  --independent-judge-model claude-sonnet-4-6 \
+  --generation-max-concurrency 6 \
+  --judge-max-concurrency 6 \
+  --context-save-mode full \
+  --max-provider-calls 5300 \
+  --progress \
+  --progress-interval-seconds 30 \
+  --report-path PRIVATE_DIR/answer_ablation_200_report.json \
+  --resume \
+  --dry-run
+```
+
+On a fresh extension, dry-run must report:
+
+```text
+selected queries:                 200
+variant contexts:               2,200
+answers / independent judgments: 2,600 / 2,600
+unavailable saved stages:          400
+reused GPT / Claude jobs:           540 / 660
+new GPT / Claude calls:            1,660 / 1,940
+new provider calls:                3,600
+successful logical provider work: 4,800
+```
+
+The 5,300 cap counts metered application-level provider attempts, including recoverable
+failed attempts recorded by TrajWiki; retries hidden inside a provider SDK are not
+separately observable.
+After an interruption, the same command may report fewer remaining calls; `--resume`
+accepts only complete jobs whose schema, experiment hash, prompt hash, variant, and query
+all match. `progress.json` and stderr show stage progress, rate, errors, and ETA.
+Machine-readable command output is written atomically through `--report-path`, so CUDA
+startup output cannot corrupt JSON reports.
+
+Results are separated into the controlled Full TrajWiki reference, component ablations,
+32K upper bounds, token-matched baselines, strong RAG, observed pipeline, and historical
+external baseline groups.
+Analysis emits ordinary paired bootstrap intervals, population-prevalence-weighted
+intervals, and dialogue-cluster bootstrap sensitivity intervals. These intervals
+represent query-sampling uncertainty, not repeated model-generation variance.
+`matched_budget_compliance.csv`, `completion_truncation_summary.csv`, and
+`provider_fingerprint_summary.csv` make budget and provider drift auditable.
+
+The following remain outside the evidence supported by this run:
+
+- `Lifecycle State Hidden` is not a memory rebuild without ADD/REVISE/DEPRECATE.
+- Missing saved answer stages do not support a true no-repair or no-retry ablation.
+- Flat Raw Memory is not GraphRAG or RAPTOR.
+- The experiment does not rerun the Qwen3-8B regression.
+- It does not establish token break-even, medical safety, privacy deletion, or regulatory
+  compliance.
+
+The Kubernetes launcher requires a clean committed tree, builds and pushes one immutable
+Linux/amd64 image digest, then runs a GPU dry-run Job, a GPU formal Job, and a CPU package
+Job. A failed formal Job gets at most one resume Job. Each Job's rendered YAML, status,
+logs, and `describe` output are archived before that exact Job is deleted; no
+`kubectl delete jobs --all` operation is used.
+Before building the image, the controller verifies that the 60-query parent is complete,
+has zero integrity/validation errors, contains exactly 60 sampled queries and 1,200
+provider-ledger rows, and shares the source `details.json` hash. The validated source-run,
+SQLite, Mem0, parent, workflow-private, and bundle paths are injected explicitly into
+every Pod rather than inferred again inside the container. Set
+`TRAJWIKI_PARENT_60_EXPERIMENT` when the legacy private pointer file is unavailable.
+With `TRAJWIKI_WORKFLOW_ID=<id>`, the default final archive is
+`verification_bundle_<id>.tar.zst`.
+
+```bash
+TRAJWIKI_PARENT_60_EXPERIMENT=/absolute/path/to/parent_60 \
+TRAJWIKI_CONFIRM_FORMAL=RUN \
+scripts/launch_rebuttal_k8s.sh all
+```
+
+The CPU package Job runs answer analysis, sample-scoped offline ablation, cost,
+auditability, failure, and ranking-robustness analyses, then prepares the blinded
+24-case audit study. Packaging is refused unless both experiment validators report zero
+errors and all required 200-query protocol artifacts are present. It creates one
+mode-`0600` `.tar.zst` archive containing the source details/summary/SQLite, experiment
+jobs and contexts, parent reuse proof, normalized Mem0 answers, offline reports, audit
+files, code snapshot, dependency records, and Kubernetes logs. `.env`, credentials,
+model caches, and temporary files are excluded.
+
+```bash
+trajwiki package-rebuttal-bundle EXPERIMENT_DIR \
+  --output-path verification_bundle_<timestamp>.tar.zst \
+  --workflow-logs PRIVATE_WORKFLOW_DIR
+
+trajwiki validate-rebuttal-bundle \
+  verification_bundle_<timestamp>.tar.zst
+```
+
+Every bundle uses relative archive paths and a SHA256 manifest. Original server manifests
+are preserved unchanged even though they contain original absolute paths.
+
+## Completed 60-Query Pilot
+
+The following section documents the already completed pilot protocol for provenance and
+comparison. The current Kubernetes scripts implement the 200-query extension above; do
+not use the archived command below as the formal extension command.
+
+The rebuttal workflow reuses one completed LOCOMO multi-hop memory build. It does not
+rebuild snapshots, trajectories, or wiki pages for every answer variant. The completed
+pilot used a fixed 60-query answer-level comparison. Mem0 was not called; only its saved
+answers were independently judged.
+
+First validate the source run:
+
+```bash
+trajwiki validate-run-artifacts RUN_DIR --json
+```
+
+Normalize the already saved Mem0 answers against all 282 source-run queries. Missing or
+duplicate IDs, or mismatched sample/question/gold hashes, fail the import:
+
+```bash
+trajwiki import-baseline-answers \
+  locomo_eval/outputs/runs/<saved_mem0_run>/predictions.jsonl \
+  --method mem0_saved \
+  --run-path RUN_DIR \
+  --output-path PRIVATE_DIR/mem0_saved.normalized.jsonl
+```
+
+Set credentials for the answer generator and independent judge. Run the exact command
+once with `--dry-run` first, inspect `call_plan.json` and `token_budget_audit.csv`, then
+rerun the same command without `--dry-run`:
+
+```bash
+export OPENAI_API_KEY=...
+export ANTHROPIC_API_KEY=...
+
+trajwiki run-answer-ablation RUN_DIR \
+  --sample-size 60 \
+  --sample-seed 7 \
+  --variants full,direct_trajectory,latest_snapshot,hybrid_raw_rag,wiki_summaries,no_claim_state,no_source_constraint,full_context,naive_dense_rag \
+  --max-total-tokens 32000 \
+  --max-output-tokens 512 \
+  --token-counter tiktoken \
+  --require-exact-token-counter \
+  --token-safety-margin 128 \
+  --rag-chunk-size 384 \
+  --rag-chunk-overlap 64 \
+  --rag-top-k 4 \
+  --baseline-answers PRIVATE_DIR/mem0_saved.normalized.jsonl \
+  --backbone-provider-kind remote \
+  --backbone-model gpt-4o-mini \
+  --independent-judge-provider-kind remote \
+  --independent-judge-model claude-sonnet-4-6 \
+  --generation-max-concurrency 6 \
+  --judge-max-concurrency 6 \
+  --context-save-mode full \
+  --max-provider-calls 1300 \
+  --resume \
+  --dry-run
+```
+
+The fixed protocol selects all 9 strict deep-history cases plus 26 update-sensitive and 25
+ordinary cases, using seed 7. It fails instead of silently changing these preregistered
+quotas. Dry-run makes zero LLM provider calls, although Naive Dense RAG still prepares
+local Qwen embeddings and may populate its cache. With all nine generated variants,
+`Observed Full Pipeline`, and one saved Mem0 method, the expected upper bound is 540
+generation calls plus 660 independent-judge calls. `call_plan.json` is authoritative.
+
+The pilot used the same exact key names and one-GPU Qwen embedding preparation as the
+extension. Its earlier Kubernetes launcher has been superseded by the immutable,
+archive-before-delete workflow documented above.
+
+All nine pilot-generated methods used the same answer template, GPT-4o-mini, and the same 32K
+prompt-plus-output envelope; the source-support ablation changes only its intended
+grounding instruction. Full Context preserves raw-message boundaries when truncating.
+When the 32K envelope is exceeded, it retains the latest complete messages and renders
+the retained window in chronological order.
+Naive Dense RAG uses Qwen embeddings, 384-token chunks, 64-token overlap, and top-4 dense
+retrieval; chunk embeddings are cached by model, parameters, and source hash. Qwen
+embedding preparation completes before remote LLM workers start.
+
+The comparison boundaries matter:
+
+- `Full TrajWiki`, `No Wiki Routing`, `Latest Snapshot Only`, `Budgeted Flat Raw Memory`,
+  `Wiki Summaries Only`, `Lifecycle State Hidden`, `No Source-Support Constraint`,
+  `Full Context`, and `Naive Dense RAG` form the shared-prompt comparison.
+- `Observed Full Pipeline` is the original benchmark answer and is reported separately.
+- `mem0_saved` is a historical external baseline, not a same-protocol causal ablation.
+- `Lifecycle State Hidden` changes query-time rendering and filtering; it does not rebuild
+  memory without ADD/REVISE/DEPRECATE.
+- `Budgeted Flat Raw Memory` is the project's lexical+dense flat retriever; it is not
+  GraphRAG or RAPTOR.
+- `Wiki Summaries Only` exposes no raw source references, so source-support accuracy is
+  unobservable.
+- A no-repair or no-retry stage is judged only when the source run contains the actual
+  saved stage answer. Missing stages are recorded in `unavailable_stage_rows.jsonl` and do
+  not create judge calls.
+
+The total budget is checked against the complete answer prompt using `tiktoken` with 512
+output tokens and a 128-token safety margin reserved. Provider-reported prompt usage is
+then reconciled in `token_budget_audit.csv`; formal runs fail if exact counting is
+unavailable. Bare `local` Transformers generation and judging are serialized because the
+model and Torch RNG state are shared. Remote and OpenAI-compatible providers retain the
+requested concurrency.
+
+Generation and judge jobs are written atomically per query. `--resume` accepts a job only
+when its schema, experiment hash, prompt hash, variant, query ID, and complete status all
+match. Failed provider attempts retain their call identity in the atomic error job and
+are recovered into the call ledger before a retry. The provider-call cap therefore
+includes recorded and recoverable prior attempts plus newly planned calls, while a
+complete zero-call resume remains valid. Repeating a complete command produces zero new
+calls. External baselines have a
+separate hash/attachment manifest: adding or replacing one does not alter the core
+generation hash or regenerate the nine shared-prompt methods.
+
+Rebuild tables without provider calls, then validate completeness:
+
+```bash
+EXPERIMENT_DIR=RUN_DIR/rebuttal_experiments/answer_ablation_<config_hash>
+
+trajwiki analyze-answer-ablation \
+  "$EXPERIMENT_DIR"
+
+trajwiki validate-run-artifacts \
+  "$EXPERIMENT_DIR" --json
+```
+
+`answer_ablation_table.csv` reports both strict independent-judge accuracy (only
+`CORRECT` counts as correct) and a partial-credit judge score (`CORRECT=1`,
+`PARTIAL=0.5`, `INCORRECT=0`). `paired_statistics.csv` reports both definitions with
+10,000 paired bootstrap draws. Prevalence-weighted stratum metrics are emitted only when
+that metric is observed for every sampled query in every stratum; incomplete stage
+captures remain `null`.
+
+Do not pass the legacy Full Context or RAG result files through `--baseline-answers`.
+Their prompts, models, or retrieval protocols differ from the controlled experiment, so
+they are suitable only for strict ID/question/gold alignment and implementation
+cross-checks. The regenerated `full_context` and `naive_dense_rag` variants are the
+same-protocol results used in the main comparison. Only the already saved Mem0 answers
+are attached as a clearly labeled historical external baseline.
+
+Run the remaining 60-query offline reports with the same sampling manifest. Their outputs
+are isolated under `EXPERIMENT_DIR/offline_analysis/`, so they do not overwrite full-run
+282-query artifacts:
+
+```bash
+SCOPE="$EXPERIMENT_DIR/sampling_manifest.json"
+
+trajwiki analyze-offline-ablation RUN_DIR \
+  --sampling-manifest "$SCOPE"
+
+trajwiki analyze-cost-benefit RUN_DIR \
+  --sampling-manifest "$SCOPE"
+
+trajwiki analyze-auditability RUN_DIR \
+  --sampling-manifest "$SCOPE"
+
+trajwiki analyze-failures \
+  --run-path RUN_DIR \
+  --sampling-manifest "$SCOPE"
+```
+
+Run the zero-call retrieval-weight sensitivity analysis:
+
+```bash
+trajwiki analyze-ranking-robustness RUN_DIR \
+  --relative-perturbation 0.20 \
+  --random-draws 100 \
+  --seed 7 \
+  --cutoff 15 \
+  --page-cutoffs 5,10,15 \
+  --trajectory-cutoffs 5,10,15,20,30 \
+  --sampling-manifest "$SCOPE"
+```
+
+This perturbs reconstructable deterministic page-routing and trajectory-ranking
+coefficients by plus or minus 20 percent and replays page/trajectory cutoffs over saved
+full rankings. Lexical/mismatch residuals, RRF `k`, and the saved LLM set-rerank decision
+remain fixed. Page perturbations report candidate-set reachability rather than pretending
+that trajectories newly introduced by a different page set have saved query-time scores.
+The trajectory-build parameter `m` cannot be replayed from the current database and must
+use the paper's existing sweep.
+
+Prepare the blinded 24-case human audit:
+
+```bash
+trajwiki prepare-audit-study RUN_DIR \
+  --case-count 24 \
+  --seed 7 \
+  --answer-experiment "$EXPERIMENT_DIR"
+
+trajwiki conduct-audit-study AUDIT_TASKS \
+  --annotator-slot 1 \
+  --annotator-id annotator-a \
+  --output-path AUDIT_DIR/audit_results_1.jsonl \
+  --max-exposure 2
+
+trajwiki conduct-audit-study AUDIT_TASKS \
+  --annotator-slot 2 \
+  --annotator-id annotator-b \
+  --output-path AUDIT_DIR/audit_results_2.jsonl \
+  --max-exposure 2
+
+trajwiki analyze-audit-study AUDIT_DIR \
+  --audit-labels AUDIT_DIR/audit_labels_adjudicated.csv
+```
+
+The first exposure produces 48 counterbalanced primary judgments across two annotators;
+the second exposure adds 48 crossover judgments for exploratory agreement. Give
+annotators only `audit_tasks.jsonl`, never `audit_study_key.jsonl` or the adjudication
+template. The researcher must adjudicate `true_source_supported`,
+`true_failure_stage`, and supporting references before unblinding the condition key.
+The private adjudication template includes the question, regenerated candidate answer,
+gold answer, and gold references needed for that judgment, but never exposes the packet
+condition.
+External labels may also include `true_supporting_source_refs`,
+`true_conflict_required`,
+`true_conflict_handled`, `true_obsolete_required`, and `true_obsolete_handled`; without
+them the report does not claim source-localization, failure-stage, conflict-detection, or
+obsolete-handling accuracy.
+
+Every context and audit artifact containing dialogue text is marked
+`contains_sensitive_text=true`. Keep `rebuttal_experiments/`, normalized external
+predictions, annotator data, and private keys access-controlled; define retention and
+verified deletion procedures before sharing or deployment.
 
 Inspect aggregate results:
 
@@ -672,6 +1125,7 @@ src/trajpatch/pipeline/answering.py   LOCOMO answer generation and repair
 src/trajpatch/memory/                 Memory extraction, trajectories, wiki, retrieval
 src/trajpatch/providers/              Remote, local, OpenAI-compatible, mock providers
 src/trajpatch/analysis/               Failure analysis and offline diagnostics
+src/trajpatch/experiments/            Rebuttal ablations, statistics, validation, audit study
 src/trajpatch/storage/                SQLite schema and repository methods
 tests/unit/                           Focused unit tests
 tests/integration/                    End-to-end and artifact tests
@@ -686,6 +1140,8 @@ PYTHONPATH=src pytest -q tests/unit/test_failure_attribution.py
 PYTHONPATH=src pytest -q tests/unit/test_offline_ablation.py
 PYTHONPATH=src pytest -q tests/unit/test_cost_benefit.py
 PYTHONPATH=src pytest -q tests/unit/test_auditability.py
+PYTHONPATH=src pytest -q tests/unit/test_experiment_statistics.py
+PYTHONPATH=src pytest -q tests/unit/test_sample_scoped_analysis.py
 PYTHONPATH=src pytest -q tests/unit/test_llm_text_parsers.py
 PYTHONPATH=src pytest -q tests/unit/test_openai_compatible_provider.py
 PYTHONPATH=src pytest -q tests/unit/test_vllm_server_manager.py
@@ -694,6 +1150,7 @@ PYTHONPATH=src pytest -q tests/integration/test_batch_modes.py
 PYTHONPATH=src pytest -q tests/integration/test_offline_ablation_artifacts.py
 PYTHONPATH=src pytest -q tests/integration/test_cost_benefit_artifacts.py
 PYTHONPATH=src pytest -q tests/integration/test_auditability_artifacts.py
+PYTHONPATH=src pytest -q tests/integration/test_answer_ablation_experiment.py
 ```
 
 Run the full suite:
@@ -720,7 +1177,9 @@ Recommended reading order for new contributors:
 7. `src/trajpatch/analysis/offline_ablation.py`
 8. `src/trajpatch/analysis/cost_benefit.py`
 9. `src/trajpatch/analysis/auditability.py`
-10. `src/trajpatch/storage/models.py`
+10. `src/trajpatch/experiments/answer_ablation.py`
+11. `src/trajpatch/experiments/variant_contexts.py`
+12. `src/trajpatch/storage/models.py`
 
 ## Design Notes
 
