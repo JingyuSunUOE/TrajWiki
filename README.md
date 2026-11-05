@@ -70,23 +70,6 @@ medmt/
   information_contradiction.json
 ```
 
-### Research And Deployment Boundaries
-
-TrajWiki is a research prototype, not a clinical decision system or a compliance-ready
-personal-memory service. MedMT evaluates long-context memory behavior only; generated
-medical content must not be treated as medical advice. The reference implementation stores
-run artifacts in local files and SQLite and does not provide encryption at rest, access
-control, tenant isolation, consent management, retention policies, or HIPAA/GDPR
-certification.
-
-Append-only snapshots preserve an epistemic revision history, but they must not be
-interpreted as a requirement to retain personal data indefinitely. A production deployment
-needs an authenticated hard-deletion path that removes the affected raw messages,
-snapshots, claims, embeddings, wiki links, caches, and exported diagnostics, followed by
-index rebuilding and deletion verification. High-risk domains additionally require
-freshness checks, conflict quarantine, source verification, and human oversight before
-memory updates or answers can influence decisions.
-
 ## Installation
 
 Use Python 3.11 or newer.
@@ -191,9 +174,6 @@ PYTHONPATH=src python -m trajpatch benchmark-locomo \
   --verbose
 ```
 
-The diagnostic flags above do not add extra answer-generation calls. They write compact
-JSON/JSONL/CSV artifacts that can later be analyzed offline. For quick smoke tests, leave
-them disabled.
 
 ### LOCOMO With Local vLLM
 
@@ -287,9 +267,6 @@ PYTHONPATH=src python -m trajpatch benchmark-locomo \
   --verbose
 ```
 
-With `--vllm-autostart`, the runner checks `/v1/models`, reuses an existing compatible
-server when available, otherwise starts `vllm serve`, waits for readiness, and stops only
-the process it started. Use `--vllm-keep-alive` to leave the launched server running.
 
 ### LOCOMO With Bare Local Transformers
 
@@ -446,9 +423,6 @@ These options are disabled by default and are intended mainly for LOCOMO paper r
 - `--audit-packet-save-mode`: `summary` or `compact`; `compact` includes short source and
   claim previews, never embedding vectors.
 
-The LOCOMO-only diagnostic writers are skipped on MedMT runs even if the flags are present.
-This lets shared scripts pass the same option set to both benchmarks without producing
-misleading MedMT ablation/audit artifacts.
 
 ### Provider Modes
 
@@ -573,42 +547,6 @@ written under `analysis_v2/` instead of overwriting the originals. Compact call 
 globally unique run/worker/role/call identifiers and include
 `cost_reconciliation.json` when cost diagnostics are enabled.
 
-Rebuttal experiments are stored separately:
-
-```text
-rebuttal_experiments/answer_ablation_<config_hash>/
-  experiment_manifest.json
-  sampling_manifest.json
-  gold_label_rows.jsonl
-  call_plan.json
-  external_baseline_manifest.json
-  retrieval_plan_rows.jsonl
-  variant_context_rows.jsonl
-  token_budget_audit.csv
-  unavailable_stage_rows.jsonl
-  contexts/<variant>/<query>.json.gz
-  jobs/generation/<variant>/<query>.json
-  jobs/judge/<variant>/<query>.json
-  answer_ablation_rows.jsonl
-  answer_ablation_table.csv
-  paired_statistics.csv
-  stage_diagnostic_statistics.csv
-  stratum_summary.csv
-  variant_cost_summary.csv
-  balanced_failure_examples.jsonl
-  integrity_report.json
-  offline_analysis/
-rebuttal_experiments/audit_study_seed<seed>_<count>/
-  audit_tasks.jsonl
-  audit_study_key.jsonl
-  audit_study_manifest.json
-  audit_labels_template.csv
-```
-
-Full prompts and raw retrieved context are intentionally not copied into compact
-diagnostics. Large text stays in controlled debug artifacts or SQLite records where needed.
-Full answer-ablation contexts and human-audit packets do contain dialogue text. Treat those
-directories as sensitive and review dataset and privacy constraints before publishing them.
 
 ## Evaluation And Analysis
 
