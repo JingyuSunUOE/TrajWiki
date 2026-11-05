@@ -1,6 +1,6 @@
 # TrajWiki
 
-TrajWiki is an offline benchmark framework for long-memory question answering. It builds
+TrajWiki is an agentic memory framework for long-memory question answering. It builds
 source-grounded episodic memory trajectories, compiles a per-sample wiki routing layer,
 retrieves compact evidence, generates grounded answers, and stores detailed diagnostics for
 failure analysis, offline counterfactual ablations, cost-benefit analysis, and auditability
@@ -23,8 +23,6 @@ For each logical sample, TrajWiki runs a fixed memory-and-evaluation pipeline:
 10. Persist SQLite records, memory exports, summary/detail JSON, and optional analysis
     artifacts for retrieval ablation, cost analysis, and provenance auditing.
 
-The default LOCOMO answer path is `freeform_v2`. The older structured
-`answer_evidence_synthesis` path remains as a legacy fallback, not the default.
 
 ## Supported Benchmarks
 
